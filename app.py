@@ -33,7 +33,8 @@ APP_TITLE = "🌈 Magic Story Maker"
 APP_SUBTITLE = "Upload a picture and create a fun story for kids!"
 
 TARGET_MIN_WORDS = 50
-TARGET_MAX_WORDS = 100
+TARGET_MAX_WORDS = 150   # soft upper ceiling; hard truncation applied below
+TARGET_HARD_MAX  = 120  # sentence-boundary truncation kicks in above this
 
 # ── Model identifiers ────────────────────────────────────
 # Image captioning: GIT-Large fine-tuned on COCO
@@ -250,7 +251,7 @@ def generate_story(caption: str, style: str) -> str:
     return clean_text(story)
 
 
-# ── 4c. Constraint enforcement (unchanged logic) ─────────
+# ── 4c. Constraint enforcement ───────────────────────────
 def get_story_quality_flags(story: str) -> Dict[str, object]:
     wc = count_words(story)
     return {
@@ -260,27 +261,64 @@ def get_story_quality_flags(story: str) -> Dict[str, object]:
     }
 
 
+def _truncate_at_sentence_boundary(text: str, max_words: int) -> str:
+    """
+    Hard-truncate `text` to at most `max_words` words while keeping
+    the last *complete* sentence intact.
+
+    Algorithm:
+    1. Split on sentence-ending punctuation, accumulate sentences
+       until adding the next would exceed `max_words`.
+    2. Fall back to plain word-level cut (+ closing period) if no
+       sentence boundary fits within the limit.
+    """
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    kept: list[str] = []
+    total = 0
+    for sent in sentences:
+        wc = count_words(sent)
+        if total + wc <= max_words:
+            kept.append(sent)
+            total += wc
+        else:
+            break
+    if kept:
+        return " ".join(kept)
+    # Fallback: word-level truncation
+    words = text.split()
+    truncated = " ".join(words[:max_words]).rstrip(",;:-")
+    if not truncated.endswith((".", "!", "?")):
+        truncated += "."
+    return truncated
+
+
 def _fix_story(story: str, caption: str, style: str, reason: str) -> str:
-    """Single-pass rewrite with a corrective instruction prepended."""
-    fix_caption = (
+    """Single-pass LLM rewrite with a corrective instruction prepended."""
+    fix_prompt = (
         f"{reason} "
         f"Rewrite the story to be between 60 and 80 words, "
         f"safe, warm, and child-friendly. "
         f"Keep the same scene: \"{caption}\". Style: {style}.\n\n"
         f"Original story:\n{story}"
     )
-    return generate_story(fix_caption, style)
+    return generate_story(fix_prompt, style)
 
 
 def enforce_story_constraints(
     story: str,
     caption: str,
     style: str,
-    max_retries: int = 3,
+    max_retries: int = 2,
 ) -> Tuple[str, Optional[str]]:
     """
-    Enforce word-count (50–100) and safety constraints.
-    Returns (final_story, optional_warning_message).
+    Enforce word-count and safety constraints with graceful degradation.
+    Returns (final_story, optional_warning_message). Never raises.
+
+    Flow:
+    1. Up to `max_retries` LLM rewrites for safety / length issues.
+    2. Still too long  → hard sentence-boundary truncation (no crash).
+    3. Still too short → return as-is with an informational warning.
+    4. Still unsafe    → replace with a guaranteed-safe fallback sentence.
     """
     warning = None
     current = clean_text(story)
@@ -309,14 +347,32 @@ def enforce_story_constraints(
                 current, caption, style,
                 f"The story is too long ({info['word_count']} words)."
             )
-            warning = "The story was shortened to meet the word limit."
+            warning = "The story was trimmed to meet the word limit."
 
+    # ── Final safety-net (no more LLM calls) ─────────────────────────────
     final_info = get_story_quality_flags(current)
-    if not final_info["in_range"] or final_info["unsafe"]:
-        raise ValueError(
-            f"Could not generate a valid story after {max_retries} retries. "
-            f"Final word count: {final_info['word_count']}"
+
+    # 1. Still unsafe → guaranteed-safe fallback
+    if final_info["unsafe"]:
+        current = (
+            "Once upon a time, a little friend went on a gentle adventure "
+            "and came home happy, warm, and full of joy."
         )
+        return current, "The story was replaced with a safe version for children."
+
+    # 2. Still too long → hard truncation at sentence boundary
+    if final_info["word_count"] > TARGET_HARD_MAX:
+        current = _truncate_at_sentence_boundary(current, TARGET_HARD_MAX)
+        warning = warning or "The story was automatically shortened to fit the word limit."
+
+    # 3. Still too short → informational warning only
+    final_wc = count_words(current)
+    if final_wc < TARGET_MIN_WORDS:
+        warning = (
+            f"The story is a little short ({final_wc} words) "
+            "but should still be enjoyable!"
+        )
+
     return current, warning
 
 
