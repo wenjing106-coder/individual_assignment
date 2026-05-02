@@ -9,7 +9,8 @@ from typing import Dict, Optional, Tuple
 import streamlit as st
 from gtts import gTTS
 from PIL import Image, UnidentifiedImageError
-from transformers import pipeline
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+import torch
 
 
 # =========================================================
@@ -30,22 +31,21 @@ TARGET_HARD_MAX  = 110   # sentence-boundary hard-truncation ceiling
 
 # ── Model identifiers ────────────────────────────────────────────────────────
 # Caption  : microsoft/git-base-coco — 182 M params, ~728 MB fp32
-#            GIT (Generative Image-to-Text) is a Transformer decoder
-#            conditioned on CLIP visual tokens.  Fine-tuned on COCO, it
-#            generates notably more descriptive, scene-aware captions than
-#            BLIP-base, e.g. "a boy in a red jacket running through a sunlit
-#            park" rather than just "a person in a park".
-#            Loaded first, then freed before the story LLM is loaded.
+#            GIT (Generative Image-to-Text) decoder conditioned on CLIP
+#            visual tokens; fine-tuned on COCO.  Generates scene-aware
+#            captions such as "a boy in a red jacket running through a
+#            sunlit park".  Loaded first, freed before story LLM loads.
 CAPTION_MODEL_NAME = "microsoft/git-base-coco"
 
-# Story    : MBZUAI/LaMini-Flan-T5-248M — 248 M params, ~496 MB fp16
-#            A distilled, instruction-fine-tuned variant of flan-t5-base
-#            trained on 2.58 M diverse instruction samples (LaMini dataset).
-#            Instruction tuning makes it far more responsive to persona,
-#            style, and word-count directives than vanilla flan-t5-base,
-#            producing richer, more child-friendly literary prose.
-#            Loaded after caption model is freed; peak RAM ≈ 728 MB ✅
-STORY_MODEL_NAME = "MBZUAI/LaMini-Flan-T5-248M"
+# Story    : Qwen/Qwen2.5-0.5B-Instruct — 494 M params, ~500 MB fp16
+#            Decoder-only causal LM with instruction fine-tuning.
+#            Unlike seq2seq models (T5, LaMini), a decoder LM never
+#            "regurgitates" prompt rules into the output — it simply
+#            continues the conversation.  The chat-template interface
+#            separates system/user/assistant roles cleanly, so the model
+#            receives a concise scene description and returns a story.
+#            Loaded after caption model freed; peak RAM ≈ 728 MB ✅
+STORY_MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 
 # TTS      : gTTS — zero local RAM (HTTPS call to Google TTS).
 #            Streamlit Cloud allows outbound HTTPS; no WebSocket needed.
@@ -59,9 +59,18 @@ BANNED_TERMS = [
 ]
 
 STYLE_OPTIONS: Dict[str, str] = {
-    "Warm & Happy 😊": "warm and cheerful, ending with a smile",
-    "Adventure 🚀":    "exciting and playful, ending safely and happily",
-    "Bedtime 🌙":      "calm and soothing, like a gentle lullaby",
+    "Warm & Happy 😊": (
+        "warm and cheerful",
+        "The story ends with everyone smiling and feeling happy."
+    ),
+    "Adventure 🚀": (
+        "exciting and playful",
+        "The story ends with a safe, joyful adventure completed."
+    ),
+    "Bedtime 🌙": (
+        "calm and soothing",
+        "The story ends peacefully, like a gentle lullaby sending the characters to sleep."
+    ),
 }
 
 
@@ -73,9 +82,8 @@ def count_words(text: str) -> int:
 
 
 def contains_unsafe_content(text: str) -> bool:
-    # E1: whole-word matching — avoids false positives where a banned term
-    # appears as a substring of a harmless word (e.g. "dead" inside
-    # "dead-end", or inside a model output phrase like "instead").
+    # Whole-word matching — avoids false positives on substrings
+    # (e.g. "dead" inside "instead").
     lowered = text.lower()
     return any(
         re.search(r'\b' + re.escape(term) + r'\b', lowered)
@@ -131,23 +139,19 @@ def _truncate_at_sentence_boundary(text: str, max_words: int) -> str:
 # =========================================================
 # 3. STEP-WISE MODEL EXECUTION  (load → run → free)
 # =========================================================
-# Architecture rationale
-# ─────────────────────
-# Streamlit Cloud free tier has ~1 GB usable RAM.
-# Loading all models at once needs far more RAM → instant OOM / 5-min hang.
+# Memory budget on Streamlit Cloud free tier (~1 GB usable RAM)
+# ──────────────────────────────────────────────────────────────
+# Models are loaded sequentially and freed immediately after use:
 #
-# Solution: load each model, run it, then *explicitly* delete it and call
-# gc.collect() before loading the next one.  Peak RAM at any moment:
-#   max(728 MB git-base-coco,  496 MB LaMini-Flan-T5 fp16,  ~50 MB gTTS)
-#   ≈ 728 MB ✅
+#   Step 1  git-base-coco (caption)    ~728 MB  → del + gc
+#   Step 2  Qwen2.5-0.5B-Instruct fp16 ~500 MB  → del + gc
+#   Step 3  gTTS (HTTPS, no local RAM)   ~0 MB
 #
-# We do NOT use @st.cache_resource because keeping all models resident
-# simultaneously is exactly what caused the previous 5-minute hang.
+#   Peak RAM = max(728, 500) = 728 MB  ✅  (well under 1 GB)
 
 def _run_caption(image: Image.Image) -> str:
     """
-    Load microsoft/git-base-coco, caption the image, immediately free the model.
-    GIT generates scene-aware captions trained on COCO — richer than BLIP-base.
+    Load microsoft/git-base-coco, caption the image, free the model.
     ~728 MB peak RAM, released before story generation begins.
     """
     pipe = pipeline(
@@ -164,162 +168,114 @@ def _run_caption(image: Image.Image) -> str:
         gc.collect()
 
 
-def _expand_caption(raw_caption: str, style: str) -> str:
+def _build_chat_messages(caption: str, style_tone: str,
+                          style_ending: str) -> list:
     """
-    Turn the terse GIT caption into a child-friendly, story-ready scene
-    description using LaMini-Flan-T5-248M.
+    Build the chat-template message list for Qwen2.5-0.5B-Instruct.
 
-    Design notes (Plan A + C)
-    ─────────────────────────
-    • NO full example output — small seq2seq models copy examples verbatim
-      instead of adapting them to the actual caption.  Removing the example
-      forces the model to work from the real caption text.
-    • Vocabulary guard — explicit instruction to use only words a 6-year-old
-      knows prevents rare literary terms from leaking into the expansion.
+    G2 design rationale
+    ───────────────────
+    Qwen2.5-0.5B-Instruct is a decoder-only causal LM with instruction
+    fine-tuning.  Its chat template separates system / user / assistant
+    roles so the model never confuses "instructions" with "story output".
+
+    The system message establishes a children's author persona with clear
+    vocabulary and length constraints.  The user message provides only
+    the scene — a short, focused input that leaves no room for the model
+    to leak prompt text back.
+
+    Crucially we do NOT embed style descriptions or word-count rules as
+    numbered rules inside the user turn — doing so caused LaMini to copy
+    the rule text verbatim.  Instead, all structural constraints live in
+    the system message, which Qwen treats as background context rather
+    than content to reproduce.
     """
-    prompt = (
-        "Rewrite the image description below as one lively sentence for a "
-        "children's picture book aged 3 to 8. "
-        "Add one colour and one sound or feeling. "
-        "Use only simple, everyday words a 6-year-old knows. "
-        "Do NOT copy example sentences. Base everything on the description.\n\n"
-        "Image description: " + raw_caption + "\n"
-        "Story tone: " + style + "\n\n"
-        "Expanded scene:"
+    system_msg = (
+        "You are a kind and imaginative children's storyteller. "
+        "When given a scene description, you write a short, original story "
+        "for children aged 4 to 8. "
+        "Always use simple, everyday words a young child understands. "
+        "Your stories are " + style_tone + ". "
+        + style_ending + " "
+        "Write between 60 and 90 words. "
+        "Do not include a title. Do not repeat sentences."
     )
-    pipe = pipeline(
-        task="text2text-generation",
-        model=STORY_MODEL_NAME,
-        model_kwargs={"torch_dtype": "auto"},
+    user_msg = (
+        "Write a children's story about this scene:\n"
+        + caption
     )
-    try:
-        out = pipe(
-            prompt,
-            max_new_tokens=80,
-            num_beams=4,
-            early_stopping=True,
-            no_repeat_ngram_size=3,
-        )
-        expanded = clean_text(out[0]["generated_text"])
-        # E2: if the expansion itself contains a banned word, fall back to
-        # raw_caption — prevents a dangerous word from being injected into
-        # the story via the content anchor (Rule 1 in _build_story_prompt).
-        if contains_unsafe_content(expanded):
-            return raw_caption
-        # Fall back to raw caption if expansion looks degenerate
-        if len(expanded) < 15 or expanded.lower().startswith(raw_caption.lower()[:20]):
-            return raw_caption
-        return expanded
-    except Exception:
-        return raw_caption
-    finally:
-        del pipe
-        gc.collect()
+    return [
+        {"role": "system",  "content": system_msg},
+        {"role": "user",    "content": user_msg},
+    ]
 
 
-def _one_sentence(pipe, prompt: str, max_new_tokens: int = 40) -> str:
+def _run_story(caption: str, style_label: str) -> str:
     """
-    Ask the model to generate exactly one continuation sentence.
-    Low max_new_tokens keeps each call fast and prevents the model
-    from running past a single sentence boundary.
+    G2 — Qwen2.5-0.5B-Instruct with chat template
+    ───────────────────────────────────────────────
+    Load Qwen2.5-0.5B-Instruct in fp16, generate the story via the
+    official chat-template interface, then free the model.
+
+    Why Qwen2.5-0.5B-Instruct outperforms LaMini / flan-t5:
+    • Decoder-only architecture: the model appends to the assistant turn
+      rather than transforming input text, so prompt rules never appear
+      in the output.
+    • Instruction fine-tuning on diverse creative tasks: the model
+      genuinely understands "write a children's story" and honours
+      length / style constraints without repeating them.
+    • fp16 weight loading keeps peak RAM at ~500 MB — safely within the
+      728 MB already occupied by the caption step.
+
+    Generation parameters chosen for story quality:
+    • do_sample=True, temperature=0.8  — controlled creativity without
+      wild hallucinations; deterministic beam search on a small model
+      tends to produce repetitive high-probability phrases.
+    • top_p=0.9                        — nucleus sampling filters the
+      very long tail of low-probability tokens.
+    • repetition_penalty=1.15          — mild penalty keeps successive
+      sentences from starting with the same phrase.
+    • max_new_tokens=180               — generous ceiling; constraint
+      enforcement trims if needed.
+    • min_new_tokens=60                — prevents a one-sentence output.
     """
-    out = pipe(
-        prompt,
-        max_new_tokens=max_new_tokens,
-        num_beams=2,
-        no_repeat_ngram_size=3,
-        repetition_penalty=1.3,
-        early_stopping=True,
-    )
-    raw = clean_text(out[0]["generated_text"])
-    # Keep only the first complete sentence
-    first = re.split(r'(?<=[.!?])\s', raw)[0].strip()
-    if not first:
-        return raw
-    if not first[-1] in ".!?":
-        first += "."
-    return first
+    style_tone, style_ending = STYLE_OPTIONS[style_label]
+    messages = _build_chat_messages(caption, style_tone, style_ending)
 
-
-# ── Style mood words used to colour the closing sentence ─────────────────────
-_STYLE_MOOD: Dict[str, str] = {
-    "warm and cheerful, ending with a smile":          "happy and warm",
-    "exciting and playful, ending safely and happily": "brave and glad",
-    "calm and soothing, like a gentle lullaby":        "sleepy and safe",
-}
-
-
-def _run_story(rich_caption: str, style: str) -> str:
-    """
-    F3 — Sentence-chain architecture
-    ─────────────────────────────────
-    Instead of asking LaMini-Flan-T5-248M to generate an entire story
-    from a long rule-laden prompt (which causes 'instruction following
-    collapse' — the model regurgitates the rules instead of writing a
-    story), we split the task into three micro-calls:
-
-      Call 1 — Opening sentence
-        Input : "One day, {rich_caption}."  (scene anchor, ≤15 tokens)
-        Output: 1 new sentence that introduces characters/action.
-
-      Call 2 — Middle sentence
-        Input : sentences 0+1 so far  (≤30 tokens)
-        Output: 1 new sentence that develops the scene.
-
-      Call 3 — Closing sentence
-        Input : sentences 0+1+2 so far  (≤50 tokens)
-        Output: 1 warm, happy closing sentence.
-
-    Each call receives ≤50 tokens of context and must generate ≤40
-    tokens, well within LaMini's reliable operating range.  The scene
-    anchor in sentence 0 keeps all three sentences topically grounded
-    to the uploaded image.
-
-    The model is loaded once, used for all three calls, then freed.
-    Peak RAM ≈ 496 MB fp16 — unchanged from before.
-    """
-    mood = _STYLE_MOOD.get(style, "happy")
-
-    pipe = pipeline(
-        task="text2text-generation",
-        model=STORY_MODEL_NAME,
-        model_kwargs={"torch_dtype": "auto"},
+    tokenizer = AutoTokenizer.from_pretrained(STORY_MODEL_NAME)
+    model = AutoModelForCausalLM.from_pretrained(
+        STORY_MODEL_NAME,
+        torch_dtype=torch.float16,
+        device_map="cpu",
     )
     try:
-        # ── Sentence 0: fixed scene anchor (no model call needed) ─────────
-        s0 = f"One day, {rich_caption}."
-
-        # ── Sentence 1: opening action ────────────────────────────────────
-        p1 = (
-            f"{s0} "
-            f"Continue the story with one short sentence about what happened next:"
+        # Apply Qwen's built-in chat template to format the messages
+        text = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
         )
-        s1 = _one_sentence(pipe, p1, max_new_tokens=40)
+        inputs = tokenizer(text, return_tensors="pt")
+        input_len = inputs["input_ids"].shape[1]
 
-        # ── Sentence 2: middle development ───────────────────────────────
-        p2 = (
-            f"{s0} {s1} "
-            f"Continue the story with one short sentence that adds a colour or sound:"
-        )
-        s2 = _one_sentence(pipe, p2, max_new_tokens=40)
+        with torch.no_grad():
+            output_ids = model.generate(
+                **inputs,
+                max_new_tokens=180,
+                min_new_tokens=60,
+                do_sample=True,
+                temperature=0.8,
+                top_p=0.9,
+                repetition_penalty=1.15,
+                pad_token_id=tokenizer.eos_token_id,
+            )
 
-        # ── Sentence 3: second middle sentence ───────────────────────────
-        p3 = (
-            f"{s0} {s1} {s2} "
-            f"Continue the story with one more short sentence:"
-        )
-        s3 = _one_sentence(pipe, p3, max_new_tokens=40)
-
-        # ── Sentence 4: warm closing ──────────────────────────────────────
-        p4 = (
-            f"{s0} {s1} {s2} {s3} "
-            f"End the story with one warm, {mood} sentence:"
-        )
-        s4 = _one_sentence(pipe, p4, max_new_tokens=40)
-
-        return clean_text(f"{s0} {s1} {s2} {s3} {s4}")
+        # Decode only the newly generated tokens (strip the prompt)
+        new_tokens = output_ids[0][input_len:]
+        story = tokenizer.decode(new_tokens, skip_special_tokens=True)
+        return clean_text(story)
     finally:
-        del pipe
+        del model, tokenizer
         gc.collect()
 
 
@@ -338,9 +294,7 @@ def _run_tts(text: str) -> bytes:
 # =========================================================
 # 4. CONSTRAINT ENFORCEMENT  (no extra LLM calls)
 # =========================================================
-def enforce_story_constraints(
-    story: str,
-) -> Tuple[str, Optional[str]]:
+def enforce_story_constraints(story: str) -> Tuple[str, Optional[str]]:
     """
     Pure post-processing: no further model calls.
 
@@ -363,7 +317,6 @@ def enforce_story_constraints(
     if wc > TARGET_HARD_MAX:
         current = _truncate_at_sentence_boundary(current, TARGET_HARD_MAX)
         warning = "The story was lightly trimmed to keep it short and sweet."
-
     elif wc < TARGET_MIN_WORDS:
         warning = (
             f"The story is a little short ({wc} words) "
@@ -399,7 +352,7 @@ def render_sidebar() -> Tuple[str, bool, bool]:
 def render_footer() -> None:
     st.markdown("---")
     st.caption(
-        "Built with Streamlit · GIT-base-COCO · LaMini-Flan-T5-248M · gTTS"
+        "Built with Streamlit · GIT-base-COCO · Qwen2.5-0.5B-Instruct · gTTS"
     )
 
 
@@ -409,7 +362,6 @@ def render_footer() -> None:
 def main() -> None:
     render_header()
     story_style_label, show_caption, show_debug = render_sidebar()
-    style_instruction = STYLE_OPTIONS[story_style_label]
 
     uploaded_file = st.file_uploader(
         "Upload an image",
@@ -450,28 +402,22 @@ def main() -> None:
         st.subheader("🖼️ Image Caption")
         st.write(raw_caption)
 
-    # ── Step 2: Caption expansion ────────────────────────────────────────────
-    with st.spinner("🌈 Imagining the scene…"):
+    # ── Step 2: Story generation (G2 — Qwen2.5-0.5B-Instruct) ───────────────
+    with st.spinner("📝 Writing your story…"):
         t0 = time.time()
-        rich_caption = _expand_caption(raw_caption, style_instruction)
-        t_expand = time.time() - t0
-
-    # ── Step 3: Story generation (F3 sentence-chain) ─────────────────────────
-    with st.spinner("📝 Writing your story sentence by sentence…"):
-        t0 = time.time()
-        raw_story = _run_story(rich_caption, style_instruction)
+        raw_story = _run_story(raw_caption, story_style_label)
         t_story = time.time() - t0
 
     final_story, warning_message = enforce_story_constraints(raw_story)
 
-    # ── Step 4: TTS ──────────────────────────────────────────────────────────
+    # ── Step 3: TTS ──────────────────────────────────────────────────────────
     with st.spinner("🔊 Recording the story…"):
         t0 = time.time()
         audio_bytes = _run_tts(final_story)
         t_tts = time.time() - t0
 
     # ── Output ────────────────────────────────────────────────────────────────
-    elapsed    = t_caption + t_expand + t_story + t_tts
+    elapsed    = t_caption + t_story + t_tts
     word_count = count_words(final_story)
 
     st.success("Your story is ready! 🎉")
@@ -504,18 +450,16 @@ def main() -> None:
     if show_debug:
         st.markdown("### 🛠 Debug Info")
         st.write({
-            "caption_model":  CAPTION_MODEL_NAME,
-            "story_model":    STORY_MODEL_NAME,
-            "story_arch":    "F3 sentence-chain (4 micro-calls)",
-            "raw_caption":    raw_caption,
-            "rich_caption":   rich_caption,
-            "word_count":     word_count,
-            "t_caption_s":    round(t_caption, 1),
-            "t_expand_s":     round(t_expand, 1),
-            "t_story_s":      round(t_story, 1),
-            "t_tts_s":        round(t_tts, 1),
-            "total_s":        round(elapsed, 1),
-            "style":          story_style_label,
+            "caption_model": CAPTION_MODEL_NAME,
+            "story_model":   STORY_MODEL_NAME,
+            "story_arch":    "G2 chat-template (single call)",
+            "raw_caption":   raw_caption,
+            "word_count":    word_count,
+            "t_caption_s":   round(t_caption, 1),
+            "t_story_s":     round(t_story, 1),
+            "t_tts_s":       round(t_tts, 1),
+            "total_s":       round(elapsed, 1),
+            "style":         story_style_label,
         })
 
     if word_count < TARGET_MIN_WORDS or word_count > TARGET_MAX_WORDS:
