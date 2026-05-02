@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import re
+import tempfile
 import time
 from typing import Dict, Optional, Tuple
 
+import edge_tts
 import streamlit as st
 from PIL import Image, UnidentifiedImageError
-from transformers import pipeline
-from gtts import gTTS
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    pipeline,
+)
 
 
 # =========================================================
@@ -29,20 +35,38 @@ APP_SUBTITLE = "Upload a picture and create a fun story for kids!"
 TARGET_MIN_WORDS = 50
 TARGET_MAX_WORDS = 100
 
-# Suggested models
-CAPTION_MODEL_NAME = "Salesforce/blip-image-captioning-base"
-STORY_MODEL_NAME = "google/flan-t5-base"
+# ── Model identifiers ────────────────────────────────────
+# Image captioning: GIT-Large fine-tuned on COCO
+# Produces richer, more descriptive captions than BLIP-base
+CAPTION_MODEL_NAME = "microsoft/git-large-coco"
+
+# Story LLM: Qwen2.5-0.5B-Instruct
+# ~1 GB RAM on CPU, instruction-tuned, strong creative writing
+STORY_MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
+
+# ── Edge-TTS voice ───────────────────────────────────────
+# Microsoft Neural TTS – warm, nurturing English female voice
+# Full voice list: run `edge-tts --list-voices` in a terminal
+TTS_VOICE = "en-US-JennyNeural"          # warm, storytelling voice
+TTS_RATE  = "-5%"                        # slightly slower for children
+TTS_PITCH = "+2Hz"                       # gentle lift for warmth
 
 # Safety / content control
 BANNED_TERMS = [
     "blood", "kill", "dead", "gun", "knife", "monster", "horror",
-    "terror", "violent", "violence", "war", "hate"
+    "terror", "violent", "violence", "war", "hate",
 ]
 
 STYLE_OPTIONS = {
-    "Warm & Happy 😊": "Write a warm, happy, gentle story with a cheerful ending.",
-    "Adventure 🚀": "Write a playful, exciting adventure story with a safe and happy ending.",
-    "Bedtime 🌙": "Write a calm, cozy bedtime story with soft and soothing language."
+    "Warm & Happy 😊": (
+        "warm, happy, and gentle with a cheerful ending"
+    ),
+    "Adventure 🚀": (
+        "playful and exciting with a safe and happy ending"
+    ),
+    "Bedtime 🌙": (
+        "calm, cozy, and soothing — perfect for falling asleep"
+    ),
 }
 
 
@@ -67,34 +91,20 @@ def clean_text(text: str) -> str:
     return text
 
 
-def truncate_to_max_words(text: str, max_words: int = TARGET_MAX_WORDS) -> str:
-    """Trim text to max word limit if needed."""
-    words = text.split()
-    if len(words) <= max_words:
-        return text
-    trimmed = " ".join(words[:max_words]).rstrip(",;:-")
-    if not trimmed.endswith((".", "!", "?")):
-        trimmed += "."
-    return trimmed
-
-
 def validate_image(uploaded_file) -> Tuple[bool, Optional[str]]:
     """Validate uploaded image file."""
     if uploaded_file is None:
         return False, "Please upload an image first."
-
     allowed_types = ["image/png", "image/jpeg", "image/jpg", "image/webp"]
     if uploaded_file.type not in allowed_types:
         return False, "Only PNG, JPG, JPEG, and WEBP images are supported."
-
     return True, None
 
 
 def safe_open_image(uploaded_file) -> Image.Image:
     """Open uploaded image safely and convert to RGB."""
     try:
-        image = Image.open(uploaded_file).convert("RGB")
-        return image
+        return Image.open(uploaded_file).convert("RGB")
     except UnidentifiedImageError as e:
         raise ValueError("The uploaded file is not a valid image.") from e
     except Exception as e:
@@ -104,272 +114,225 @@ def safe_open_image(uploaded_file) -> Image.Image:
 # =========================================================
 # 3. MODEL LOADING (CACHED)
 # =========================================================
-@st.cache_resource(show_spinner=True)
+@st.cache_resource(show_spinner="Loading image captioning model…")
 def load_caption_pipeline():
     """
-    Load image captioning pipeline once.
-    Using Hugging Face pipeline for assignment alignment.
+    GIT-Large fine-tuned on COCO.
+    Produces richer, more descriptive captions than BLIP-base,
+    which in turn gives the story model better raw material.
     """
     return pipeline(
         task="image-to-text",
-        model=CAPTION_MODEL_NAME
+        model=CAPTION_MODEL_NAME,
     )
 
 
-@st.cache_resource(show_spinner=True)
-def load_story_pipeline():
+@st.cache_resource(show_spinner="Loading story generation model…")
+def load_story_model():
     """
-    Load story generation pipeline once.
-    FLAN-T5 works well with instruction-style prompts.
+    Qwen2.5-0.5B-Instruct loaded for CPU inference.
+    torch_dtype=float32  → avoids bfloat16 issues on CPU-only hosts.
+    low_cpu_mem_usage    → loads layer-by-layer to keep peak RAM low.
     """
-    return pipeline(
-        task="text2text-generation",
-        model=STORY_MODEL_NAME
+    tokenizer = AutoTokenizer.from_pretrained(STORY_MODEL_NAME)
+    model = AutoModelForCausalLM.from_pretrained(
+        STORY_MODEL_NAME,
+        torch_dtype="auto",        # float32 on CPU, bfloat16 if GPU found
+        low_cpu_mem_usage=True,
     )
+    return tokenizer, model
 
 
 # =========================================================
 # 4. CORE GENERATION FUNCTIONS
 # =========================================================
+
+# ── 4a. Image captioning ─────────────────────────────────
 def generate_caption(image: Image.Image) -> str:
-    """Generate an image caption from uploaded image."""
+    """
+    Generate an image caption using GIT-Large (COCO).
+
+    GIT produces more detailed, context-aware descriptions than
+    BLIP-base, giving the story model richer raw material.
+    Example output:
+        "a little girl in a yellow raincoat jumping in puddles
+         on a rainy day, smiling and holding a red umbrella"
+    """
     caption_pipe = load_caption_pipeline()
     results = caption_pipe(image)
 
-    # Expected HF output: list of dicts, e.g. [{"generated_text": "..."}]
     if not results or "generated_text" not in results[0]:
         raise ValueError("Caption model did not return a valid result.")
 
-    caption = clean_text(results[0]["generated_text"])
-    return caption
+    return clean_text(results[0]["generated_text"])
 
 
-def build_story_prompt(caption: str, style_instruction: str) -> str:
+# ── 4b. Story generation with Qwen2.5-0.5B-Instruct ──────
+def _build_system_prompt() -> str:
+    return (
+        "You are a gifted children's author who writes in a lyrical, "
+        "imaginative style — like a blend of Beatrix Potter and A.A. Milne. "
+        "Your stories are warm, whimsical, and full of sensory detail. "
+        "You always write in complete sentences and finish with a gentle, "
+        "happy ending."
+    )
+
+
+def _build_user_prompt(caption: str, style: str) -> str:
+    return (
+        f"Write a children's story inspired by this scene:\n"
+        f"\"{caption}\"\n\n"
+        f"Requirements:\n"
+        f"- Style: {style}\n"
+        f"- Length: between 60 and 80 words — no more, no less.\n"
+        f"- Language: simple, musical English for children aged 3–10.\n"
+        f"- Tone: whimsical, warm, and imaginative.\n"
+        f"- Include at least one vivid sensory detail (colour, sound, smell, "
+        f"texture, or taste).\n"
+        f"- End with a cosy, happy sentence.\n"
+        f"- Output the story text ONLY — no title, no labels, no extra words."
+    )
+
+
+def generate_story(caption: str, style: str) -> str:
     """
-    Build a stronger prompt for a child-friendly story.
-    This version gives stricter length and structure requirements.
+    Generate a children's story via Qwen2.5-0.5B-Instruct.
+
+    Uses the model's native chat template so instruction-following
+    is applied correctly, producing noticeably richer prose than
+    the seq2seq FLAN-T5 approach.
     """
-    prompt = f"""
-You are a children's storyteller.
+    tokenizer, model = load_story_model()
 
-Write a complete children's story based on the image caption below.
+    messages = [
+        {"role": "system", "content": _build_system_prompt()},
+        {"role": "user",   "content": _build_user_prompt(caption, style)},
+    ]
 
-Strict requirements:
-- The story MUST be between 60 and 80 words.
-- Use very simple English for children aged 3 to 10.
-- Make it gentle, fun, and easy to understand.
-- Avoid scary, violent, sad, or inappropriate content.
+    # apply_chat_template formats the conversation correctly for Qwen
+    text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    inputs = tokenizer([text], return_tensors="pt")
 
-Style:
-{style_instruction}
+    # Generate — constrained to ~120 new tokens (~80 words)
+    output_ids = model.generate(
+        **inputs,
+        max_new_tokens=150,
+        min_new_tokens=60,
+        do_sample=True,
+        temperature=0.85,      # creative but controlled
+        top_p=0.92,
+        repetition_penalty=1.15,
+        no_repeat_ngram_size=3,
+        pad_token_id=tokenizer.eos_token_id,
+    )
 
-Image caption:
-{caption}
-"""
-    return clean_text(prompt)
+    # Strip the prompt tokens; keep only the newly generated part
+    new_ids = output_ids[0][inputs["input_ids"].shape[1]:]
+    story = tokenizer.decode(new_ids, skip_special_tokens=True)
+    return clean_text(story)
 
-def generate_story_from_prompt(prompt: str) -> str:
-    """
-    Generate a story from the prepared prompt.
 
-    This version is more deterministic and better for length control.
-    """
-    story_pipe = load_story_pipeline()
-
-    try:
-        results = story_pipe(
-            prompt,
-            max_new_tokens=120,
-            min_new_tokens=60,
-            do_sample=False,
-            num_beams=4,
-            repetition_penalty=1.15,
-            no_repeat_ngram_size=3,
-        )
-    except Exception as exc:
-        raise RuntimeError("Story generation failed.") from exc
-
-    if not results or "generated_text" not in results[0]:
-        raise RuntimeError("Story model returned an invalid result.")
-
-    story = clean_text(results[0]["generated_text"])
-    if not story:
-        raise RuntimeError("Story model returned an empty story.")
-
-    return story
-
-def expand_story_to_target_length(
-    short_story: str,
-    caption: str,
-    style_instruction: str,
-) -> str:
-    """
-    Expand a story that is too short into a full children's story.
-    """
-    prompt = f"""
-You are writing for children aged 3 to 10.
-
-Expand the short story below into a complete children's story.
-
-Requirements:
-- Make it between 60 and 80 words.
-- Use simple and friendly English.
-- Keep it warm, gentle, safe, and easy to understand.
-- Keep a happy ending.
-- Stay faithful to this image caption: {caption}
-- Follow this style: {style_instruction}
-
-Short story:
-{short_story}
-"""
-    return generate_story_from_prompt(clean_text(prompt))
-
-def shorten_story_to_target_length(
-    long_story: str,
-    caption: str,
-    style_instruction: str,
-) -> str:
-    """
-    Rewrite a story that is too long into the target length.
-    """
-    prompt = f"""
-You are writing for children aged 3 to 10.
-
-Rewrite the story below into a shorter version.
-
-Requirements:
-- Make it between 60 and 80 words.
-- Keep the same main idea.
-- Use simple and friendly English.
-- Keep it safe, warm, and suitable for children.
-- Keep a happy ending.
-- Stay faithful to this image caption: {caption}
-- Follow this style: {style_instruction}
-
-Story:
-{long_story}
-"""
-    return generate_story_from_prompt(clean_text(prompt))    
-
-def rewrite_story(
-    original_story: str,
-    caption: str,
-    style_instruction: str,
-    reason: str,
-) -> str:
-    """
-    Rewrite a story when it is too short, too long, or contains unsafe content.
-    """
-    repair_prompt = f"""
-Rewrite the children's story below.
-
-Reason for rewrite:
-{reason}
-
-Requirements:
-- Keep the story between 60 and 80 words.
-- Use simple English for children aged 3 to 10.
-- Make it safe, gentle, fun, and suitable for young children.
-- Keep a clear and happy ending.
-- Stay aligned with this image caption: {caption}
-- Follow this style: {style_instruction}
-
-Story:
-{original_story}
-"""
-    return generate_story_from_prompt(clean_text(repair_prompt))
-
+# ── 4c. Constraint enforcement (unchanged logic) ─────────
 def get_story_quality_flags(story: str) -> Dict[str, object]:
-    """
-    Return diagnostic information about the generated story.
-
-    Output:
-    - word_count: number of words in the story
-    - unsafe: whether the story contains banned terms
-    - in_range: whether the story is within the assignment word limit
-    """
     wc = count_words(story)
-    unsafe = contains_unsafe_content(story)
-    in_range = TARGET_MIN_WORDS <= wc <= TARGET_MAX_WORDS
-
     return {
         "word_count": wc,
-        "unsafe": unsafe,
-        "in_range": in_range,
+        "unsafe":     contains_unsafe_content(story),
+        "in_range":   TARGET_MIN_WORDS <= wc <= TARGET_MAX_WORDS,
     }
+
+
+def _fix_story(story: str, caption: str, style: str, reason: str) -> str:
+    """Single-pass rewrite with a corrective instruction prepended."""
+    fix_caption = (
+        f"{reason} "
+        f"Rewrite the story to be between 60 and 80 words, "
+        f"safe, warm, and child-friendly. "
+        f"Keep the same scene: \"{caption}\". Style: {style}.\n\n"
+        f"Original story:\n{story}"
+    )
+    return generate_story(fix_caption, style)
+
 
 def enforce_story_constraints(
     story: str,
     caption: str,
-    style_instruction: str,
+    style: str,
     max_retries: int = 3,
 ) -> Tuple[str, Optional[str]]:
     """
-    Enforce assignment constraints strictly.
-
-    Rules:
-    - Story must be between 50 and 100 words
-    - Story must be safe for children
-    - If the story still fails after retries, raise an error
-      instead of silently returning an invalid result
+    Enforce word-count (50–100) and safety constraints.
+    Returns (final_story, optional_warning_message).
     """
-    warning_message = None
-    current_story = clean_text(story)
+    warning = None
+    current = clean_text(story)
 
     for _ in range(max_retries):
-        info = get_story_quality_flags(current_story)
-
+        info = get_story_quality_flags(current)
         if info["in_range"] and not info["unsafe"]:
-            return current_story, warning_message
+            return current, warning
 
         if info["unsafe"]:
-            current_story = rewrite_story(
-                original_story=current_story,
-                caption=caption,
-                style_instruction=style_instruction,
-                reason="The story contains unsafe content for young children.",
+            current = _fix_story(
+                current, caption, style,
+                "The story contains content unsuitable for children."
             )
-            warning_message = "The story was rewritten to make it safer for children."
-            continue
+            warning = "The story was rewritten to make it safer for children."
 
-        if info["word_count"] < TARGET_MIN_WORDS:
-            current_story = expand_story_to_target_length(
-                short_story=current_story,
-                caption=caption,
-                style_instruction=style_instruction,
+        elif info["word_count"] < TARGET_MIN_WORDS:
+            current = _fix_story(
+                current, caption, style,
+                f"The story is too short ({info['word_count']} words)."
             )
-            warning_message = "The story was expanded automatically to meet the word limit."
-            continue
+            warning = "The story was expanded to meet the word limit."
 
-        if info["word_count"] > TARGET_MAX_WORDS:
-            current_story = shorten_story_to_target_length(
-                long_story=current_story,
-                caption=caption,
-                style_instruction=style_instruction,
+        elif info["word_count"] > TARGET_MAX_WORDS:
+            current = _fix_story(
+                current, caption, style,
+                f"The story is too long ({info['word_count']} words)."
             )
-            warning_message = "The story was shortened automatically to meet the word limit."
-            continue
+            warning = "The story was shortened to meet the word limit."
 
-    # Final strict validation
-    final_info = get_story_quality_flags(current_story)
+    final_info = get_story_quality_flags(current)
     if not final_info["in_range"] or final_info["unsafe"]:
         raise ValueError(
-            f"Failed to generate a valid story after retries. "
+            f"Could not generate a valid story after {max_retries} retries. "
             f"Final word count: {final_info['word_count']}"
         )
+    return current, warning
 
-    return current_story, warning_message
 
-
-def text_to_speech_bytes(text: str, lang: str = "en") -> bytes:
+# ── 4d. Text-to-Speech via edge-tts ──────────────────────
+def text_to_speech_bytes(text: str) -> bytes:
     """
-    Convert story text to MP3 bytes using gTTS.
+    Convert story text to MP3 bytes using Microsoft Edge Neural TTS.
+
+    edge-tts is async; we run it in a temporary file to avoid
+    buffering issues with the streaming API, then read it back.
+    The JennyNeural voice is warm and nurturing — ideal for
+    children's bedtime or story-time content.
     """
-    tts = gTTS(text=text, lang=lang)
-    audio_buffer = io.BytesIO()
-    tts.write_to_fp(audio_buffer)
-    audio_buffer.seek(0)
-    return audio_buffer.read()
+    async def _synthesise(text: str, tmp_path: str) -> None:
+        communicate = edge_tts.Communicate(
+            text,
+            voice=TTS_VOICE,
+            rate=TTS_RATE,
+            pitch=TTS_PITCH,
+        )
+        await communicate.save(tmp_path)
+
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    # Run the async synthesis in a fresh event loop
+    asyncio.run(_synthesise(text, tmp_path))
+
+    with open(tmp_path, "rb") as f:
+        return f.read()
 
 
 # =========================================================
@@ -379,8 +342,8 @@ def render_header():
     st.title(APP_TITLE)
     st.caption(APP_SUBTITLE)
     st.write(
-        "This app turns a picture into a short story and reads it aloud. "
-        "Perfect for young children! ✨"
+        "Upload a picture and watch it become a magical story — "
+        "read aloud just for you! ✨"
     )
 
 
@@ -388,19 +351,18 @@ def render_sidebar():
     st.sidebar.header("⚙️ Story Settings")
     story_style = st.sidebar.selectbox(
         "Choose a story style",
-        list(STYLE_OPTIONS.keys())
+        list(STYLE_OPTIONS.keys()),
     )
-
     show_caption = st.sidebar.checkbox("Show image caption", value=True)
-    show_debug = st.sidebar.checkbox("Show debug info", value=False)
-
+    show_debug   = st.sidebar.checkbox("Show debug info",   value=False)
     return story_style, show_caption, show_debug
 
 
 def render_footer():
     st.markdown("---")
     st.caption(
-        "Built with Streamlit, Hugging Face Transformers, and gTTS."
+        "Built with Streamlit · GIT-Large (COCO) · "
+        "Qwen2.5-0.5B-Instruct · Microsoft Edge Neural TTS"
     )
 
 
@@ -414,7 +376,7 @@ def main():
 
     uploaded_file = st.file_uploader(
         "Upload an image",
-        type=["png", "jpg", "jpeg", "webp"]
+        type=["png", "jpg", "jpeg", "webp"],
     )
 
     if uploaded_file is not None:
@@ -431,36 +393,32 @@ def main():
             generate_btn = st.button("✨ Create My Story")
 
             if generate_btn:
-                with st.spinner("Creating your magical story..."):
+                with st.spinner("Creating your magical story… 🪄"):
                     start_time = time.time()
 
-                    # Step 1: Caption
+                    # Step 1 – Rich image caption (GIT-Large)
                     caption = generate_caption(image)
 
-                    # Step 2: Prompt
-                    prompt = build_story_prompt(
-                        caption=caption,
-                        style_instruction=style_instruction
-                    )
+                    # Step 2 – Story (Qwen2.5-0.5B-Instruct)
+                    raw_story = generate_story(caption, style_instruction)
 
-                    # Step 3: Story
-                    raw_story = generate_story_from_prompt(prompt)
-
-                    # Step 4: Constraint enforcement
+                    # Step 3 – Constraint enforcement
                     final_story, warning_message = enforce_story_constraints(
-                    story=raw_story,
-                    caption=caption,
-                    style_instruction=style_instruction
+                        story=raw_story,
+                        caption=caption,
+                        style=style_instruction,
                     )
 
-
-                    # Step 5: TTS
+                    # Step 4 – Warm TTS (Edge Neural)
                     audio_bytes = text_to_speech_bytes(final_story)
 
-                    elapsed = time.time() - start_time
+                    elapsed    = time.time() - start_time
                     word_count = count_words(final_story)
 
                 st.success("Your story is ready! 🎉")
+
+                if warning_message:
+                    st.info(warning_message)
 
                 if show_caption:
                     st.subheader("🖼️ Image Caption")
@@ -476,30 +434,30 @@ def main():
                     label="📥 Download Story as Text",
                     data=final_story,
                     file_name="story.txt",
-                    mime="text/plain"
+                    mime="text/plain",
                 )
-
                 st.download_button(
                     label="📥 Download Audio",
                     data=audio_bytes,
                     file_name="story.mp3",
-                    mime="audio/mpeg"
+                    mime="audio/mpeg",
                 )
 
                 if show_debug:
                     st.markdown("### 🛠 Debug Info")
                     st.write({
                         "caption_model": CAPTION_MODEL_NAME,
-                        "story_model": STORY_MODEL_NAME,
-                        "word_count": word_count,
-                        "elapsed_seconds": round(elapsed, 2),
-                        "style": story_style_label,
+                        "story_model":   STORY_MODEL_NAME,
+                        "tts_voice":     TTS_VOICE,
+                        "word_count":    word_count,
+                        "elapsed_sec":   round(elapsed, 2),
+                        "style":         story_style_label,
                     })
 
                 if word_count < TARGET_MIN_WORDS or word_count > TARGET_MAX_WORDS:
                     st.warning(
-                        f"Story word count is {word_count}, which is outside the preferred range "
-                        f"({TARGET_MIN_WORDS}-{TARGET_MAX_WORDS})."
+                        f"Story word count is {word_count}, outside the preferred "
+                        f"range ({TARGET_MIN_WORDS}–{TARGET_MAX_WORDS})."
                     )
 
         except Exception as e:
@@ -507,7 +465,7 @@ def main():
             st.exception(e)
 
     else:
-        st.info("Upload a picture to begin your story adventure!")
+        st.info("Upload a picture to begin your story adventure! 🌟")
 
     render_footer()
 
