@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import re
 import time
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import streamlit as st
 from PIL import Image, UnidentifiedImageError
@@ -256,7 +256,7 @@ Requirements:
 Story:
 {long_story}
 """
-    return generate_story_from_prompt(clean_text(prompt))
+    return generate_story_from_prompt(clean_text(prompt))    
 
 def rewrite_story(
     original_story: str,
@@ -286,6 +286,25 @@ Story:
 {original_story}
 """
     return generate_story_from_prompt(clean_text(repair_prompt))
+
+def get_story_quality_flags(story: str) -> Dict[str, object]:
+    """
+    Return diagnostic information about the generated story.
+
+    Output:
+    - word_count: number of words in the story
+    - unsafe: whether the story contains banned terms
+    - in_range: whether the story is within the assignment word limit
+    """
+    wc = count_words(story)
+    unsafe = contains_unsafe_content(story)
+    in_range = TARGET_MIN_WORDS <= wc <= TARGET_MAX_WORDS
+
+    return {
+        "word_count": wc,
+        "unsafe": unsafe,
+        "in_range": in_range,
+    }
 
 def enforce_story_constraints(
     story: str,
