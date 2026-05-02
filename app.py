@@ -436,11 +436,12 @@ def main():
                     raw_story = generate_story_from_prompt(prompt)
 
                     # Step 4: Constraint enforcement
-                    final_story = enforce_story_constraints(
-                        story=raw_story,
-                        fallback_caption=caption,
-                        style_instruction=style_instruction
+                    final_story, warning_message = enforce_story_constraints(
+                    story=raw_story,
+                    caption=caption,
+                    style_instruction=style_instruction
                     )
+
 
                     # Step 5: TTS
                     audio_bytes = text_to_speech_bytes(final_story)
