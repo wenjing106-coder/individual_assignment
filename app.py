@@ -159,14 +159,6 @@ Strict requirements:
 - Use very simple English for children aged 3 to 10.
 - Make it gentle, fun, and easy to understand.
 - Avoid scary, violent, sad, or inappropriate content.
-- The story must have a clear beginning, middle, and happy ending.
-- Output only the story.
-- Do not write a title.
-- Do not write bullet points.
-- Do not write fewer than 60 words.
-- Do not repeat the rules.
-- Do not mention word limits.
-- Do not mention style instructions.
 
 Style:
 {style_instruction}
@@ -205,7 +197,7 @@ def generate_story_from_prompt(prompt: str) -> str:
         raise RuntimeError("Story model returned an empty story.")
 
     return story
-    
+
 def expand_story_to_target_length(
     short_story: str,
     caption: str,
@@ -226,7 +218,6 @@ Requirements:
 - Keep a happy ending.
 - Stay faithful to this image caption: {caption}
 - Follow this style: {style_instruction}
-- Write only the story.
 
 Short story:
 {short_story}
@@ -254,7 +245,6 @@ Requirements:
 - Keep a happy ending.
 - Stay faithful to this image caption: {caption}
 - Follow this style: {style_instruction}
-- Write only the story.
 
 Story:
 {long_story}
@@ -283,7 +273,6 @@ Requirements:
 - Keep a clear and happy ending.
 - Stay aligned with this image caption: {caption}
 - Follow this style: {style_instruction}
-- Write only the revised story.
 
 Story:
 {original_story}
