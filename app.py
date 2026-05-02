@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import asyncio
 import io
 import re
-import tempfile
+import struct
 import time
 from typing import Dict, Optional, Tuple
 
-import edge_tts
+import numpy as np
 import streamlit as st
+from kokoro import KPipeline
 from PIL import Image, UnidentifiedImageError
 from transformers import (
     AutoModelForCausalLM,
@@ -44,12 +44,13 @@ CAPTION_MODEL_NAME = "microsoft/git-large-coco"
 # ~1 GB RAM on CPU, instruction-tuned, strong creative writing
 STORY_MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 
-# ── Edge-TTS voice ───────────────────────────────────────
-# Microsoft Neural TTS – warm, nurturing English female voice
-# Full voice list: run `edge-tts --list-voices` in a terminal
-TTS_VOICE = "en-US-JennyNeural"          # warm, storytelling voice
-TTS_RATE  = "-5%"                        # slightly slower for children
-TTS_PITCH = "+2Hz"                       # gentle lift for warmth
+# ── Kokoro TTS ──────────────────────────────────────────
+# Kokoro-82M: open-weight neural TTS, fully offline, no network needed.
+# Runs on CPU via PyTorch. Models are cached by HF Hub after first download.
+# Voice af_heart = warm American-English female voice ("heart" voice)
+TTS_VOICE      = "af_heart"   # warm, nurturing storytelling voice
+TTS_LANG_CODE  = "a"          # 'a' = American English
+TTS_SPEED      = 0.92         # slightly slower for young listeners
 
 # Safety / content control
 BANNED_TERMS = [
@@ -131,16 +132,29 @@ def load_caption_pipeline():
 def load_story_model():
     """
     Qwen2.5-0.5B-Instruct loaded for CPU inference.
-    torch_dtype=float32  → avoids bfloat16 issues on CPU-only hosts.
-    low_cpu_mem_usage    → loads layer-by-layer to keep peak RAM low.
+    torch_dtype=auto  → float32 on CPU, bfloat16 if GPU found.
+    low_cpu_mem_usage → loads layer-by-layer to keep peak RAM low.
     """
     tokenizer = AutoTokenizer.from_pretrained(STORY_MODEL_NAME)
     model = AutoModelForCausalLM.from_pretrained(
         STORY_MODEL_NAME,
-        torch_dtype="auto",        # float32 on CPU, bfloat16 if GPU found
+        torch_dtype="auto",
         low_cpu_mem_usage=True,
     )
     return tokenizer, model
+
+
+@st.cache_resource(show_spinner="Loading voice model…")
+def load_tts_pipeline() -> KPipeline:
+    """
+    Kokoro-82M KPipeline — loaded once and cached for the session.
+
+    Kokoro is a fully offline neural TTS engine (82M parameters).
+    It requires espeak-ng for English grapheme-to-phoneme conversion,
+    which is declared in packages.txt for Streamlit Cloud.
+    Voice 'af_heart' is the warm, nurturing American-English female voice.
+    """
+    return KPipeline(lang_code=TTS_LANG_CODE)
 
 
 # =========================================================
@@ -306,33 +320,61 @@ def enforce_story_constraints(
     return current, warning
 
 
-# ── 4d. Text-to-Speech via edge-tts ──────────────────────
+# ── 4d. Text-to-Speech via Kokoro-82M ───────────────────
+def _numpy_to_wav_bytes(audio: np.ndarray, sample_rate: int = 24000) -> bytes:
+    """
+    Convert a float32 numpy audio array to an in-memory WAV file (bytes).
+
+    Kokoro outputs float32 PCM at 24 kHz. We normalise, convert to int16,
+    then wrap in a minimal WAV header so Streamlit's st.audio() can play it.
+    """
+    # Normalise to [-1, 1] and convert to 16-bit PCM
+    audio_clipped = np.clip(audio, -1.0, 1.0)
+    pcm = (audio_clipped * 32767).astype(np.int16)
+    pcm_bytes = pcm.tobytes()
+
+    # Build a standard WAV header (44 bytes)
+    num_channels    = 1
+    bits_per_sample = 16
+    byte_rate       = sample_rate * num_channels * bits_per_sample // 8
+    block_align     = num_channels * bits_per_sample // 8
+    data_size       = len(pcm_bytes)
+    chunk_size      = 36 + data_size
+
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF", chunk_size, b"WAVE",
+        b"fmt ", 16,
+        1,               # PCM format
+        num_channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        bits_per_sample,
+        b"data", data_size,
+    )
+    return header + pcm_bytes
+
+
 def text_to_speech_bytes(text: str) -> bytes:
     """
-    Convert story text to MP3 bytes using Microsoft Edge Neural TTS.
+    Convert story text to WAV bytes using Kokoro-82M neural TTS.
 
-    edge-tts is async; we run it in a temporary file to avoid
-    buffering issues with the streaming API, then read it back.
-    The JennyNeural voice is warm and nurturing — ideal for
-    children's bedtime or story-time content.
+    Kokoro runs fully offline — no WebSocket, no external API.
+    The 'af_heart' voice is warm and nurturing, ideal for children's
+    stories. Audio chunks are concatenated then encoded as WAV.
     """
-    async def _synthesise(text: str, tmp_path: str) -> None:
-        communicate = edge_tts.Communicate(
-            text,
-            voice=TTS_VOICE,
-            rate=TTS_RATE,
-            pitch=TTS_PITCH,
-        )
-        await communicate.save(tmp_path)
+    kokoro = load_tts_pipeline()
+    chunks = []
+    for _, _, audio in kokoro(text, voice=TTS_VOICE, speed=TTS_SPEED):
+        if audio is not None and len(audio) > 0:
+            chunks.append(audio)
 
-    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
-        tmp_path = tmp.name
+    if not chunks:
+        raise RuntimeError("Kokoro TTS returned no audio for the given text.")
 
-    # Run the async synthesis in a fresh event loop
-    asyncio.run(_synthesise(text, tmp_path))
-
-    with open(tmp_path, "rb") as f:
-        return f.read()
+    full_audio = np.concatenate(chunks)
+    return _numpy_to_wav_bytes(full_audio)
 
 
 # =========================================================
@@ -362,7 +404,7 @@ def render_footer():
     st.markdown("---")
     st.caption(
         "Built with Streamlit · GIT-Large (COCO) · "
-        "Qwen2.5-0.5B-Instruct · Microsoft Edge Neural TTS"
+        "Qwen2.5-0.5B-Instruct · Kokoro-82M Neural TTS"
     )
 
 
@@ -409,7 +451,7 @@ def main():
                         style=style_instruction,
                     )
 
-                    # Step 4 – Warm TTS (Edge Neural)
+                    # Step 4 – Warm TTS (Kokoro-82M, fully offline)
                     audio_bytes = text_to_speech_bytes(final_story)
 
                     elapsed    = time.time() - start_time
@@ -428,7 +470,7 @@ def main():
                 st.write(final_story)
 
                 st.subheader("🔊 Listen")
-                st.audio(audio_bytes, format="audio/mp3")
+                st.audio(audio_bytes, format="audio/wav")
 
                 st.download_button(
                     label="📥 Download Story as Text",
@@ -439,8 +481,8 @@ def main():
                 st.download_button(
                     label="📥 Download Audio",
                     data=audio_bytes,
-                    file_name="story.mp3",
-                    mime="audio/mpeg",
+                    file_name="story.wav",
+                    mime="audio/wav",
                 )
 
                 if show_debug:
@@ -448,6 +490,7 @@ def main():
                     st.write({
                         "caption_model": CAPTION_MODEL_NAME,
                         "story_model":   STORY_MODEL_NAME,
+                        "tts_engine":    "Kokoro-82M",
                         "tts_voice":     TTS_VOICE,
                         "word_count":    word_count,
                         "elapsed_sec":   round(elapsed, 2),
