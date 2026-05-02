@@ -399,7 +399,7 @@ def render_footer():
 def main():
     render_header()
     story_style_label, show_caption, show_debug = render_sidebar()
-    story_style_instruction = STYLE_OPTIONS[story_style_label]
+    style_instruction = STYLE_OPTIONS[story_style_label]
 
     uploaded_file = st.file_uploader(
         "Upload an image",
@@ -429,7 +429,7 @@ def main():
                     # Step 2: Prompt
                     prompt = build_story_prompt(
                         caption=caption,
-                        story_style_instruction=story_style_instruction
+                        style_instruction=style_instruction
                     )
 
                     # Step 3: Story
@@ -439,7 +439,7 @@ def main():
                     final_story = enforce_story_constraints(
                         story=raw_story,
                         fallback_caption=caption,
-                        style_instruction=story_style_instruction
+                        style_instruction=style_instruction
                     )
 
                     # Step 5: TTS
@@ -505,4 +505,3 @@ def main():
 # =========================================================
 if __name__ == "__main__":
     main()
-
