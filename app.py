@@ -73,8 +73,14 @@ def count_words(text: str) -> int:
 
 
 def contains_unsafe_content(text: str) -> bool:
+    # E1: whole-word matching — avoids false positives where a banned term
+    # appears as a substring of a harmless word (e.g. "dead" inside
+    # "dead-end", or inside a model output phrase like "instead").
     lowered = text.lower()
-    return any(term in lowered for term in BANNED_TERMS)
+    return any(
+        re.search(r'\b' + re.escape(term) + r'\b', lowered)
+        for term in BANNED_TERMS
+    )
 
 
 def clean_text(text: str) -> str:
@@ -195,6 +201,11 @@ def _expand_caption(raw_caption: str, style: str) -> str:
             no_repeat_ngram_size=3,
         )
         expanded = clean_text(out[0]["generated_text"])
+        # E2: if the expansion itself contains a banned word, fall back to
+        # raw_caption — prevents a dangerous word from being injected into
+        # the story via the content anchor (Rule 1 in _build_story_prompt).
+        if contains_unsafe_content(expanded):
+            return raw_caption
         # Fall back to raw caption if expansion looks degenerate
         if len(expanded) < 15 or expanded.lower().startswith(raw_caption.lower()[:20]):
             return raw_caption
@@ -217,10 +228,10 @@ def _build_story_prompt(rich_caption: str, style: str) -> str:
       verbatim rather than adapting it to the actual scene.  Removing the
       example forces the model to generate from the real caption.
 
-    Plan B — Caption anchored into the mandatory opening sentence
-      Rule 1 forces the model to BEGIN with a sentence containing the scene
-      description.  The opening tokens act as a strong topical anchor that
-      keeps all following sentences on-topic.
+    Plan B/E3 — Content anchor (not hard first-sentence injection)
+      Rule 1 passes the scene as a topic constraint and asks the model to
+      open with 'One day,' in its own words.  This keeps the story on-topic
+      without copying potentially unsafe caption words into the output.
 
     Plan C — Explicit vocabulary guard + lower num_beams in _run_story
       "Use only words a 6-year-old knows" is far more concrete than the
@@ -229,8 +240,15 @@ def _build_story_prompt(rich_caption: str, style: str) -> str:
     return (
         "Write a short story for children aged 3 to 8.\n\n"
         "Rules:\n"
-        "1. Start the very first sentence with: "
-        "'One day, " + rich_caption + ".'\n"
+        # E3: content anchor instead of hard first-sentence injection.
+        # Injecting rich_caption verbatim as the mandatory opening sentence
+        # risks carrying a banned word straight through the safety filter.
+        # Instead we describe the scene as a topic and let the model choose
+        # its own child-safe wording — anchoring the story to the image
+        # without hard-copying potentially unsafe caption text.
+        "1. The story is about this scene: " + rich_caption + ".\n"
+        "   Begin the story with the words 'One day,' and describe that "
+        "scene in your own simple words.\n"
         "2. Write exactly 3 short paragraphs. No title. No headings.\n"
         "3. Use only simple words a 6-year-old knows, "
         "like 'big', 'soft', 'shiny', 'ran', 'laughed', 'happy'.\n"
