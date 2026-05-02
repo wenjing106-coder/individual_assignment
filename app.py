@@ -144,102 +144,210 @@ def generate_caption(image: Image.Image) -> str:
     return caption
 
 
-def build_story_prompt(
-    caption: str,
-    story_style_instruction: str,
-    min_words: int = TARGET_MIN_WORDS,
-    max_words: int = TARGET_MAX_WORDS,
-) -> str:
+def build_story_prompt(caption: str, style_instruction: str) -> str:
     """
-    Build a controlled prompt for kid-friendly story generation.
+    Build a stronger prompt for a child-friendly story.
+    This version gives stricter length and structure requirements.
     """
     prompt = f"""
-You are a creative storyteller for children aged 3 to 10.
+You are a children's storyteller.
 
-Task:
-Write a simple, imaginative, age-appropriate story based on the image caption below.
+Write a complete children's story based on the image caption below.
 
-Rules:
-- Use easy vocabulary for young children.
-- Keep the story between {min_words} and {max_words} words.
-- Make it fun, gentle, and easy to understand.
+Strict requirements:
+- The story MUST be between 60 and 80 words.
+- Use very simple English for children aged 3 to 10.
+- Make it gentle, fun, and easy to understand.
 - Avoid scary, violent, sad, or inappropriate content.
-- Give the story a clear and happy ending.
-- Write only the story. Do not add notes or explanations.
+- The story must have a clear beginning, middle, and happy ending.
+- Write only the story.
+- Do not write a title.
+- Do not write bullet points.
+- Do not write fewer than 60 words.
 
 Style:
-{story_style_instruction}
+{style_instruction}
 
 Image caption:
 {caption}
 """
     return clean_text(prompt)
 
+def generate_story_from_prompt(prompt: str) -> str:
+    """
+    Generate a story from the prepared prompt.
 
-def generate_story(prompt: str) -> str:
-    """Generate story text from prompt."""
+    This version is more deterministic and better for length control.
+    """
     story_pipe = load_story_pipeline()
 
-    results = story_pipe(
-        prompt,
-        max_new_tokens=140,
-        do_sample=True,
-        temperature=0.9,
-        top_p=0.95,
-        repetition_penalty=1.15
-    )
+    try:
+        results = story_pipe(
+            prompt,
+            max_new_tokens=120,
+            min_new_tokens=60,
+            do_sample=False,
+            num_beams=4,
+            repetition_penalty=1.15,
+            no_repeat_ngram_size=3,
+        )
+    except Exception as exc:
+        raise RuntimeError("Story generation failed.") from exc
 
-    if not results:
-        raise ValueError("Story model returned an empty result.")
+    if not results or "generated_text" not in results[0]:
+        raise RuntimeError("Story model returned an invalid result.")
 
-    # text2text-generation typically returns generated_text
     story = clean_text(results[0]["generated_text"])
-    return story
+    if not story:
+        raise RuntimeError("Story model returned an empty story.")
 
+    return story
+    
+def expand_story_to_target_length(
+    short_story: str,
+    caption: str,
+    style_instruction: str,
+) -> str:
+    """
+    Expand a story that is too short into a full children's story.
+    """
+    prompt = f"""
+You are writing for children aged 3 to 10.
+
+Expand the short story below into a complete children's story.
+
+Requirements:
+- Make it between 60 and 80 words.
+- Use simple and friendly English.
+- Keep it warm, gentle, safe, and easy to understand.
+- Keep a happy ending.
+- Stay faithful to this image caption: {caption}
+- Follow this style: {style_instruction}
+- Write only the story.
+
+Short story:
+{short_story}
+"""
+    return generate_story_from_prompt(clean_text(prompt))
+
+def shorten_story_to_target_length(
+    long_story: str,
+    caption: str,
+    style_instruction: str,
+) -> str:
+    """
+    Rewrite a story that is too long into the target length.
+    """
+    prompt = f"""
+You are writing for children aged 3 to 10.
+
+Rewrite the story below into a shorter version.
+
+Requirements:
+- Make it between 60 and 80 words.
+- Keep the same main idea.
+- Use simple and friendly English.
+- Keep it safe, warm, and suitable for children.
+- Keep a happy ending.
+- Stay faithful to this image caption: {caption}
+- Follow this style: {style_instruction}
+- Write only the story.
+
+Story:
+{long_story}
+"""
+    return generate_story_from_prompt(clean_text(prompt))
+
+def rewrite_story(
+    original_story: str,
+    caption: str,
+    style_instruction: str,
+    reason: str,
+) -> str:
+    """
+    Rewrite a story when it is too short, too long, or contains unsafe content.
+    """
+    repair_prompt = f"""
+Rewrite the children's story below.
+
+Reason for rewrite:
+{reason}
+
+Requirements:
+- Keep the story between 60 and 80 words.
+- Use simple English for children aged 3 to 10.
+- Make it safe, gentle, fun, and suitable for young children.
+- Keep a clear and happy ending.
+- Stay aligned with this image caption: {caption}
+- Follow this style: {style_instruction}
+- Write only the revised story.
+
+Story:
+{original_story}
+"""
+    return generate_story_from_prompt(clean_text(repair_prompt))
 
 def enforce_story_constraints(
     story: str,
-    fallback_caption: str,
+    caption: str,
     style_instruction: str,
-    max_retries: int = 2
-) -> str:
+    max_retries: int = 3,
+) -> Tuple[str, Optional[str]]:
     """
-    Enforce assignment constraints:
-    - 50-100 words
-    - kid-safe
-    Retry generation if needed.
+    Enforce assignment constraints strictly.
+
+    Rules:
+    - Story must be between 50 and 100 words
+    - Story must be safe for children
+    - If the story still fails after retries, raise an error
+      instead of silently returning an invalid result
     """
-    for _ in range(max_retries + 1):
-        word_count = count_words(story)
+    warning_message = None
+    current_story = clean_text(story)
 
-        if TARGET_MIN_WORDS <= word_count <= TARGET_MAX_WORDS and not contains_unsafe_content(story):
-            return story
+    for _ in range(max_retries):
+        info = get_story_quality_flags(current_story)
 
-        # If too long, try safe trimming first
-        if word_count > TARGET_MAX_WORDS and not contains_unsafe_content(story):
-            story = truncate_to_max_words(story, TARGET_MAX_WORDS)
-            if TARGET_MIN_WORDS <= count_words(story) <= TARGET_MAX_WORDS:
-                return story
+        if info["in_range"] and not info["unsafe"]:
+            return current_story, warning_message
 
-        # Regenerate with stronger instruction
-        repair_prompt = f"""
-Rewrite the following children's story.
-Requirements:
-- Keep it between {TARGET_MIN_WORDS} and {TARGET_MAX_WORDS} words.
-- Use simple words for children aged 3 to 10.
-- Make it gentle, safe, and happy.
-- Remove any scary, violent, or unsuitable ideas.
-- Keep the main idea based on this image caption: {fallback_caption}
-- Style: {style_instruction}
+        if info["unsafe"]:
+            current_story = rewrite_story(
+                original_story=current_story,
+                caption=caption,
+                style_instruction=style_instruction,
+                reason="The story contains unsafe content for young children.",
+            )
+            warning_message = "The story was rewritten to make it safer for children."
+            continue
 
-Story to rewrite:
-{story}
-"""
-        story = generate_story(clean_text(repair_prompt))
+        if info["word_count"] < TARGET_MIN_WORDS:
+            current_story = expand_story_to_target_length(
+                short_story=current_story,
+                caption=caption,
+                style_instruction=style_instruction,
+            )
+            warning_message = "The story was expanded automatically to meet the word limit."
+            continue
 
-    # Final safety net
-    final_story = truncate_to_max_words(clean_text(story), TARGET_MAX_WORDS)
-    return final_story
+        if info["word_count"] > TARGET_MAX_WORDS:
+            current_story = shorten_story_to_target_length(
+                long_story=current_story,
+                caption=caption,
+                style_instruction=style_instruction,
+            )
+            warning_message = "The story was shortened automatically to meet the word limit."
+            continue
+
+    # Final strict validation
+    final_info = get_story_quality_flags(current_story)
+    if not final_info["in_range"] or final_info["unsafe"]:
+        raise ValueError(
+            f"Failed to generate a valid story after retries. "
+            f"Final word count: {final_info['word_count']}"
+        )
+
+    return current_story, warning_message
 
 
 def text_to_speech_bytes(text: str, lang: str = "en") -> bytes:
