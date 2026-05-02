@@ -29,23 +29,28 @@ TARGET_MAX_WORDS = 120
 TARGET_HARD_MAX  = 110   # sentence-boundary hard-truncation ceiling
 
 # ── Model identifiers ────────────────────────────────────────────────────────
-# Caption  : BLIP-base  — 110 M params, ~440 MB fp32
-#            Smaller than GIT-Large but paired with a rich caption-expansion
-#            prompt that infers mood, colours, and implied story elements.
-CAPTION_MODEL_NAME = "Salesforce/blip-image-captioning-base"
+# Caption  : microsoft/git-base-coco — 182 M params, ~728 MB fp32
+#            GIT (Generative Image-to-Text) is a Transformer decoder
+#            conditioned on CLIP visual tokens.  Fine-tuned on COCO, it
+#            generates notably more descriptive, scene-aware captions than
+#            BLIP-base, e.g. "a boy in a red jacket running through a sunlit
+#            park" rather than just "a person in a park".
+#            Loaded first, then freed before the story LLM is loaded.
+CAPTION_MODEL_NAME = "microsoft/git-base-coco"
 
-# Story    : FLAN-T5-base — 250 M params, ~920 MB fp32 (seq2seq, not decoder)
-#            The seq2seq architecture is ~2× more RAM-efficient than an
-#            equivalent decoder LLM.  A carefully engineered prompt with
-#            few-shot style cues produces markedly richer prose than the
-#            vanilla flan-t5-base prompt used in v1 of this app.
-STORY_MODEL_NAME = "google/flan-t5-base"
+# Story    : MBZUAI/LaMini-Flan-T5-248M — 248 M params, ~496 MB fp16
+#            A distilled, instruction-fine-tuned variant of flan-t5-base
+#            trained on 2.58 M diverse instruction samples (LaMini dataset).
+#            Instruction tuning makes it far more responsive to persona,
+#            style, and word-count directives than vanilla flan-t5-base,
+#            producing richer, more child-friendly literary prose.
+#            Loaded after caption model is freed; peak RAM ≈ 728 MB ✅
+STORY_MODEL_NAME = "MBZUAI/LaMini-Flan-T5-248M"
 
-# TTS      : gTTS — zero local RAM (HTTP call to Google TTS).
-#            Streamlit Cloud has outbound HTTP; no WebSocket needed.
-#            Warm, natural-sounding female voice at a child-friendly pace.
-TTS_LANG       = "en"
-TTS_SLOW       = False   # gTTS slow=True sounds unnatural; handle via SSML-like pacing in text
+# TTS      : gTTS — zero local RAM (HTTPS call to Google TTS).
+#            Streamlit Cloud allows outbound HTTPS; no WebSocket needed.
+TTS_LANG = "en"
+TTS_SLOW = False
 
 # Safety
 BANNED_TERMS = [
@@ -111,7 +116,7 @@ def _truncate_at_sentence_boundary(text: str, max_words: int) -> str:
             break
     if kept:
         return " ".join(kept)
-    # fallback
+    # fallback: word-level truncation
     words = text.split()
     cut = " ".join(words[:max_words]).rstrip(",;:-")
     return cut if cut.endswith((".", "!", "?")) else cut + "."
@@ -123,19 +128,21 @@ def _truncate_at_sentence_boundary(text: str, max_words: int) -> str:
 # Architecture rationale
 # ─────────────────────
 # Streamlit Cloud free tier has ~1 GB usable RAM.
-# Loading all three models at once needs ~3.5 GB → instant OOM / 5-min hang.
+# Loading all models at once needs far more RAM → instant OOM / 5-min hang.
 #
 # Solution: load each model, run it, then *explicitly* delete it and call
-# gc.collect() before loading the next one.  Peak RAM at any moment is:
-#   max(440 MB BLIP-base,  920 MB flan-t5-base,  ~50 MB gTTS) ≈ 920 MB ✅
+# gc.collect() before loading the next one.  Peak RAM at any moment:
+#   max(728 MB git-base-coco,  496 MB LaMini-Flan-T5 fp16,  ~50 MB gTTS)
+#   ≈ 728 MB ✅
 #
-# We do NOT use @st.cache_resource here because keeping all three models
-# resident simultaneously is exactly what caused the memory problem.
+# We do NOT use @st.cache_resource because keeping all models resident
+# simultaneously is exactly what caused the previous 5-minute hang.
 
 def _run_caption(image: Image.Image) -> str:
     """
-    Load BLIP-base, caption the image, immediately free the model.
-    ~440 MB peak RAM, released before story generation begins.
+    Load microsoft/git-base-coco, caption the image, immediately free the model.
+    GIT generates scene-aware captions trained on COCO — richer than BLIP-base.
+    ~728 MB peak RAM, released before story generation begins.
     """
     pipe = pipeline(
         task="image-to-text",
@@ -153,38 +160,42 @@ def _run_caption(image: Image.Image) -> str:
 
 def _expand_caption(raw_caption: str, style: str) -> str:
     """
-    Turn the terse BLIP caption into a rich, story-ready scene description
-    using flan-t5-base *before* generating the story.  This compensates for
-    BLIP-base's brevity without needing a larger caption model.
+    Turn the terse GIT caption into a rich, imaginative scene description
+    using LaMini-Flan-T5-248M before generating the story.
 
     Example
     -------
-    raw   → "a cat sitting on a windowsill"
-    rich  → "a fluffy orange cat curled on a sunny windowsill, watching
-             raindrops trace silver lines down the glass, tail swishing gently"
+    raw   → "a boy running in a park"
+    rich  → "a laughing boy in a red jacket dashing through a sunlit park,
+             golden leaves swirling around his feet"
     """
     prompt = (
-        f"Expand this image description into a vivid, imaginative scene "
-        f"for a children's story. Add details about colours, sounds, textures, "
-        f"or feelings. Keep it warm and child-friendly. One sentence only.\n"
-        f"Description: {raw_caption}\n"
-        f"Story style: {style}\n"
-        f"Expanded scene:"
+        "Expand the image description below into one vivid, imaginative sentence "
+        "for a children's picture book. Add details about colours, sounds, "
+        "textures, and the mood of the scene. Keep it joyful and child-friendly.\n\n"
+        "Image description: " + raw_caption + "\n"
+        "Story tone: " + style + "\n\n"
+        "Example input:  a dog sitting on grass\n"
+        "Example output: a fluffy golden puppy bounding through a meadow of "
+        "daisies, ears flopping joyfully in the warm summer breeze\n\n"
+        "Expanded scene:"
     )
     pipe = pipeline(
         task="text2text-generation",
         model=STORY_MODEL_NAME,
+        model_kwargs={"torch_dtype": "auto"},
     )
     try:
         out = pipe(
             prompt,
-            max_new_tokens=60,
+            max_new_tokens=80,
             num_beams=4,
             early_stopping=True,
+            no_repeat_ngram_size=3,
         )
         expanded = clean_text(out[0]["generated_text"])
         # Fall back to raw caption if expansion looks degenerate
-        if len(expanded) < 10 or expanded.lower() == raw_caption.lower():
+        if len(expanded) < 15 or expanded.lower().startswith(raw_caption.lower()[:20]):
             return raw_caption
         return expanded
     except Exception:
@@ -196,24 +207,36 @@ def _expand_caption(raw_caption: str, style: str) -> str:
 
 def _build_story_prompt(rich_caption: str, style: str) -> str:
     """
-    Craft a detailed, few-shot-flavoured prompt for flan-t5-base.
+    Craft a rich, few-shot-flavoured prompt for LaMini-Flan-T5-248M.
 
-    Key techniques used:
-    • Explicit persona    — "You are a warm children's storyteller"
-    • Stylistic anchors   — references Beatrix Potter / bedtime book tone
-    • Few-shot structure  — shows the model exactly what output format to use
-    • Hard constraints    — word count, sensory detail, happy ending
+    Key techniques:
+    • Explicit persona    — warm children's author in the tradition of
+                            Beatrix Potter and A.A. Milne
+    • Few-shot example    — shows the exact output style and length expected
+    • Sensory anchors     — instructs model to use colour, sound, and touch
+    • Hard constraints    — 3 short paragraphs, 60–80 words, happy ending
     • Output tag          — "Story:" prefix guides the decoder strongly
     """
     return (
-        "You are a warm, imaginative children's storyteller in the style of "
-        "classic picture books. Write a short story for children aged 3 to 8.\n\n"
-        "Rules:\n"
-        "- Exactly 3 short paragraphs.\n"
-        "- Use simple, musical language with at least one colour or sound.\n"
+        "You are a warm, imaginative children's author in the tradition of "
+        "Beatrix Potter and A.A. Milne. Write a short story for children "
+        "aged 3–8 based on the scene described below.\n\n"
+        "Requirements:\n"
+        "- Exactly 3 short paragraphs (no titles, no headings).\n"
+        "- Use simple, musical language with vivid details: at least one "
+        "colour, one sound, and one texture or feeling.\n"
         "- Tone: " + style + ".\n"
-        "- End the last paragraph with a happy, cosy sentence.\n"
-        "- Do NOT include a title.\n\n"
+        "- End the final paragraph with a warm, cosy sentence.\n"
+        "- Total length: 60 to 80 words.\n\n"
+        "Example scene: a small rabbit sitting beside a babbling brook\n"
+        "Example story:\n"
+        "Little Pip the rabbit sat by the shimmering brook, listening to the "
+        "water sing its soft, bubbly song. The pebbles sparkled like tiny "
+        "diamonds, and the cool mist tickled his velvet nose.\n"
+        "A golden butterfly drifted past, and Pip hopped after it through "
+        "the tall, whispering grass, his white tail bobbing in the sunshine.\n"
+        "At last, Pip curled up beneath a mossy log, his heart full of "
+        "wonder, and drifted off to the sweetest sleep.\n\n"
         "Scene: " + rich_caption + "\n\n"
         "Story:"
     )
@@ -221,23 +244,25 @@ def _build_story_prompt(rich_caption: str, style: str) -> str:
 
 def _run_story(rich_caption: str, style: str) -> str:
     """
-    Load flan-t5-base, generate the story, immediately free the model.
-    ~920 MB peak RAM, released before TTS begins.
+    Load LaMini-Flan-T5-248M, generate the story, immediately free the model.
+    Uses fp16/auto dtype to keep RAM at ~496 MB, freed before TTS begins.
     """
     prompt = _build_story_prompt(rich_caption, style)
     pipe = pipeline(
         task="text2text-generation",
         model=STORY_MODEL_NAME,
+        model_kwargs={"torch_dtype": "auto"},
     )
     try:
         out = pipe(
             prompt,
-            max_new_tokens=200,
-            min_new_tokens=55,
+            max_new_tokens=220,
+            min_new_tokens=60,
             num_beams=5,
             no_repeat_ngram_size=3,
-            repetition_penalty=1.2,
+            repetition_penalty=1.3,
             early_stopping=True,
+            temperature=1.0,
         )
         return clean_text(out[0]["generated_text"])
     finally:
@@ -247,7 +272,7 @@ def _run_story(rich_caption: str, style: str) -> str:
 
 def _run_tts(text: str) -> bytes:
     """
-    Convert text to MP3 bytes via gTTS (Google TTS HTTP API).
+    Convert text to MP3 bytes via gTTS (Google TTS HTTPS API).
     Zero local model RAM.  Streamlit Cloud allows outbound HTTPS.
     """
     tts = gTTS(text=text, lang=TTS_LANG, slow=TTS_SLOW)
@@ -262,7 +287,6 @@ def _run_tts(text: str) -> bytes:
 # =========================================================
 def enforce_story_constraints(
     story: str,
-    max_retries: int = 0,   # retries disabled — each retry reloads the model
 ) -> Tuple[str, Optional[str]]:
     """
     Pure post-processing: no further model calls.
@@ -322,7 +346,7 @@ def render_sidebar() -> Tuple[str, bool, bool]:
 def render_footer() -> None:
     st.markdown("---")
     st.caption(
-        "Built with Streamlit · BLIP-base · FLAN-T5-base · gTTS"
+        "Built with Streamlit · GIT-base-COCO · LaMini-Flan-T5-248M · gTTS"
     )
 
 
@@ -429,7 +453,7 @@ def main() -> None:
         st.write({
             "caption_model":  CAPTION_MODEL_NAME,
             "story_model":    STORY_MODEL_NAME,
-            "tts":            "gTTS (Google, HTTP)",
+            "tts":            "gTTS (Google, HTTPS)",
             "raw_caption":    raw_caption,
             "rich_caption":   rich_caption,
             "word_count":     word_count,
