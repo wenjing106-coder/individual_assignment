@@ -217,72 +217,107 @@ def _expand_caption(raw_caption: str, style: str) -> str:
         gc.collect()
 
 
-def _build_story_prompt(rich_caption: str, style: str) -> str:
+def _one_sentence(pipe, prompt: str, max_new_tokens: int = 40) -> str:
     """
-    Craft the story prompt for LaMini-Flan-T5-248M.
-
-    Design notes (Plan A + B + C)
-    ──────────────────────────────
-    Plan A — No full example story
-      Small seq2seq models tend to reproduce an in-context example almost
-      verbatim rather than adapting it to the actual scene.  Removing the
-      example forces the model to generate from the real caption.
-
-    Plan B/E3 — Content anchor (not hard first-sentence injection)
-      Rule 1 passes the scene as a topic constraint and asks the model to
-      open with 'One day,' in its own words.  This keeps the story on-topic
-      without copying potentially unsafe caption words into the output.
-
-    Plan C — Explicit vocabulary guard + lower num_beams in _run_story
-      "Use only words a 6-year-old knows" is far more concrete than the
-      previous vague "simple language" instruction.
+    Ask the model to generate exactly one continuation sentence.
+    Low max_new_tokens keeps each call fast and prevents the model
+    from running past a single sentence boundary.
     """
-    return (
-        "Write a short story for children aged 3 to 8.\n\n"
-        "Rules:\n"
-        # E3: content anchor instead of hard first-sentence injection.
-        # Injecting rich_caption verbatim as the mandatory opening sentence
-        # risks carrying a banned word straight through the safety filter.
-        # Instead we describe the scene as a topic and let the model choose
-        # its own child-safe wording — anchoring the story to the image
-        # without hard-copying potentially unsafe caption text.
-        "1. The story is about this scene: " + rich_caption + ".\n"
-        "   Begin the story with the words 'One day,' and describe that "
-        "scene in your own simple words.\n"
-        "2. Write exactly 3 short paragraphs. No title. No headings.\n"
-        "3. Use only simple words a 6-year-old knows, "
-        "like 'big', 'soft', 'shiny', 'ran', 'laughed', 'happy'.\n"
-        "4. Include one colour and one sound in the story.\n"
-        "5. Tone: " + style + ".\n"
-        "6. End with one warm, happy sentence.\n"
-        "7. Total length: 60 to 80 words.\n\n"
-        "Story:"
+    out = pipe(
+        prompt,
+        max_new_tokens=max_new_tokens,
+        num_beams=2,
+        no_repeat_ngram_size=3,
+        repetition_penalty=1.3,
+        early_stopping=True,
     )
+    raw = clean_text(out[0]["generated_text"])
+    # Keep only the first complete sentence
+    first = re.split(r'(?<=[.!?])\s', raw)[0].strip()
+    if not first:
+        return raw
+    if not first[-1] in ".!?":
+        first += "."
+    return first
+
+
+# ── Style mood words used to colour the closing sentence ─────────────────────
+_STYLE_MOOD: Dict[str, str] = {
+    "warm and cheerful, ending with a smile":          "happy and warm",
+    "exciting and playful, ending safely and happily": "brave and glad",
+    "calm and soothing, like a gentle lullaby":        "sleepy and safe",
+}
 
 
 def _run_story(rich_caption: str, style: str) -> str:
     """
-    Load LaMini-Flan-T5-248M, generate the story, immediately free the model.
-    Uses fp16/auto dtype to keep RAM at ~496 MB, freed before TTS begins.
+    F3 — Sentence-chain architecture
+    ─────────────────────────────────
+    Instead of asking LaMini-Flan-T5-248M to generate an entire story
+    from a long rule-laden prompt (which causes 'instruction following
+    collapse' — the model regurgitates the rules instead of writing a
+    story), we split the task into three micro-calls:
+
+      Call 1 — Opening sentence
+        Input : "One day, {rich_caption}."  (scene anchor, ≤15 tokens)
+        Output: 1 new sentence that introduces characters/action.
+
+      Call 2 — Middle sentence
+        Input : sentences 0+1 so far  (≤30 tokens)
+        Output: 1 new sentence that develops the scene.
+
+      Call 3 — Closing sentence
+        Input : sentences 0+1+2 so far  (≤50 tokens)
+        Output: 1 warm, happy closing sentence.
+
+    Each call receives ≤50 tokens of context and must generate ≤40
+    tokens, well within LaMini's reliable operating range.  The scene
+    anchor in sentence 0 keeps all three sentences topically grounded
+    to the uploaded image.
+
+    The model is loaded once, used for all three calls, then freed.
+    Peak RAM ≈ 496 MB fp16 — unchanged from before.
     """
-    prompt = _build_story_prompt(rich_caption, style)
+    mood = _STYLE_MOOD.get(style, "happy")
+
     pipe = pipeline(
         task="text2text-generation",
         model=STORY_MODEL_NAME,
         model_kwargs={"torch_dtype": "auto"},
     )
     try:
-        out = pipe(
-            prompt,
-            max_new_tokens=220,
-            min_new_tokens=60,
-            num_beams=3,        # Plan C: lower beams → avoids rare high-prob literary tokens
-            no_repeat_ngram_size=3,
-            repetition_penalty=1.3,
-            early_stopping=True,
-            temperature=1.0,
+        # ── Sentence 0: fixed scene anchor (no model call needed) ─────────
+        s0 = f"One day, {rich_caption}."
+
+        # ── Sentence 1: opening action ────────────────────────────────────
+        p1 = (
+            f"{s0} "
+            f"Continue the story with one short sentence about what happened next:"
         )
-        return clean_text(out[0]["generated_text"])
+        s1 = _one_sentence(pipe, p1, max_new_tokens=40)
+
+        # ── Sentence 2: middle development ───────────────────────────────
+        p2 = (
+            f"{s0} {s1} "
+            f"Continue the story with one short sentence that adds a colour or sound:"
+        )
+        s2 = _one_sentence(pipe, p2, max_new_tokens=40)
+
+        # ── Sentence 3: second middle sentence ───────────────────────────
+        p3 = (
+            f"{s0} {s1} {s2} "
+            f"Continue the story with one more short sentence:"
+        )
+        s3 = _one_sentence(pipe, p3, max_new_tokens=40)
+
+        # ── Sentence 4: warm closing ──────────────────────────────────────
+        p4 = (
+            f"{s0} {s1} {s2} {s3} "
+            f"End the story with one warm, {mood} sentence:"
+        )
+        s4 = _one_sentence(pipe, p4, max_new_tokens=40)
+
+        return clean_text(f"{s0} {s1} {s2} {s3} {s4}")
     finally:
         del pipe
         gc.collect()
@@ -421,8 +456,8 @@ def main() -> None:
         rich_caption = _expand_caption(raw_caption, style_instruction)
         t_expand = time.time() - t0
 
-    # ── Step 3: Story generation ─────────────────────────────────────────────
-    with st.spinner("📝 Writing your story…"):
+    # ── Step 3: Story generation (F3 sentence-chain) ─────────────────────────
+    with st.spinner("📝 Writing your story sentence by sentence…"):
         t0 = time.time()
         raw_story = _run_story(rich_caption, style_instruction)
         t_story = time.time() - t0
@@ -471,7 +506,7 @@ def main() -> None:
         st.write({
             "caption_model":  CAPTION_MODEL_NAME,
             "story_model":    STORY_MODEL_NAME,
-            "tts":            "gTTS (Google, HTTPS)",
+            "story_arch":    "F3 sentence-chain (4 micro-calls)",
             "raw_caption":    raw_caption,
             "rich_caption":   rich_caption,
             "word_count":     word_count,
