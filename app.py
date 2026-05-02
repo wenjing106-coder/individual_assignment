@@ -433,7 +433,7 @@ def main():
                     )
 
                     # Step 3: Story
-                    raw_story = generate_story(prompt)
+                    raw_story = generate_story_from_promt(prompt)
 
                     # Step 4: Constraint enforcement
                     final_story = enforce_story_constraints(
