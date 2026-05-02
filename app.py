@@ -160,24 +160,25 @@ def _run_caption(image: Image.Image) -> str:
 
 def _expand_caption(raw_caption: str, style: str) -> str:
     """
-    Turn the terse GIT caption into a rich, imaginative scene description
-    using LaMini-Flan-T5-248M before generating the story.
+    Turn the terse GIT caption into a child-friendly, story-ready scene
+    description using LaMini-Flan-T5-248M.
 
-    Example
-    -------
-    raw   → "a boy running in a park"
-    rich  → "a laughing boy in a red jacket dashing through a sunlit park,
-             golden leaves swirling around his feet"
+    Design notes (Plan A + C)
+    ─────────────────────────
+    • NO full example output — small seq2seq models copy examples verbatim
+      instead of adapting them to the actual caption.  Removing the example
+      forces the model to work from the real caption text.
+    • Vocabulary guard — explicit instruction to use only words a 6-year-old
+      knows prevents rare literary terms from leaking into the expansion.
     """
     prompt = (
-        "Expand the image description below into one vivid, imaginative sentence "
-        "for a children's picture book. Add details about colours, sounds, "
-        "textures, and the mood of the scene. Keep it joyful and child-friendly.\n\n"
+        "Rewrite the image description below as one lively sentence for a "
+        "children's picture book aged 3 to 8. "
+        "Add one colour and one sound or feeling. "
+        "Use only simple, everyday words a 6-year-old knows. "
+        "Do NOT copy example sentences. Base everything on the description.\n\n"
         "Image description: " + raw_caption + "\n"
         "Story tone: " + style + "\n\n"
-        "Example input:  a dog sitting on grass\n"
-        "Example output: a fluffy golden puppy bounding through a meadow of "
-        "daisies, ears flopping joyfully in the warm summer breeze\n\n"
         "Expanded scene:"
     )
     pipe = pipeline(
@@ -207,37 +208,36 @@ def _expand_caption(raw_caption: str, style: str) -> str:
 
 def _build_story_prompt(rich_caption: str, style: str) -> str:
     """
-    Craft a rich, few-shot-flavoured prompt for LaMini-Flan-T5-248M.
+    Craft the story prompt for LaMini-Flan-T5-248M.
 
-    Key techniques:
-    • Explicit persona    — warm children's author in the tradition of
-                            Beatrix Potter and A.A. Milne
-    • Few-shot example    — shows the exact output style and length expected
-    • Sensory anchors     — instructs model to use colour, sound, and touch
-    • Hard constraints    — 3 short paragraphs, 60–80 words, happy ending
-    • Output tag          — "Story:" prefix guides the decoder strongly
+    Design notes (Plan A + B + C)
+    ──────────────────────────────
+    Plan A — No full example story
+      Small seq2seq models tend to reproduce an in-context example almost
+      verbatim rather than adapting it to the actual scene.  Removing the
+      example forces the model to generate from the real caption.
+
+    Plan B — Caption anchored into the mandatory opening sentence
+      Rule 1 forces the model to BEGIN with a sentence containing the scene
+      description.  The opening tokens act as a strong topical anchor that
+      keeps all following sentences on-topic.
+
+    Plan C — Explicit vocabulary guard + lower num_beams in _run_story
+      "Use only words a 6-year-old knows" is far more concrete than the
+      previous vague "simple language" instruction.
     """
     return (
-        "You are a warm, imaginative children's author in the tradition of "
-        "Beatrix Potter and A.A. Milne. Write a short story for children "
-        "aged 3–8 based on the scene described below.\n\n"
-        "Requirements:\n"
-        "- Exactly 3 short paragraphs (no titles, no headings).\n"
-        "- Use simple, musical language with vivid details: at least one "
-        "colour, one sound, and one texture or feeling.\n"
-        "- Tone: " + style + ".\n"
-        "- End the final paragraph with a warm, cosy sentence.\n"
-        "- Total length: 60 to 80 words.\n\n"
-        "Example scene: a small rabbit sitting beside a babbling brook\n"
-        "Example story:\n"
-        "Little Pip the rabbit sat by the shimmering brook, listening to the "
-        "water sing its soft, bubbly song. The pebbles sparkled like tiny "
-        "diamonds, and the cool mist tickled his velvet nose.\n"
-        "A golden butterfly drifted past, and Pip hopped after it through "
-        "the tall, whispering grass, his white tail bobbing in the sunshine.\n"
-        "At last, Pip curled up beneath a mossy log, his heart full of "
-        "wonder, and drifted off to the sweetest sleep.\n\n"
-        "Scene: " + rich_caption + "\n\n"
+        "Write a short story for children aged 3 to 8.\n\n"
+        "Rules:\n"
+        "1. Start the very first sentence with: "
+        "'One day, " + rich_caption + ".'\n"
+        "2. Write exactly 3 short paragraphs. No title. No headings.\n"
+        "3. Use only simple words a 6-year-old knows, "
+        "like 'big', 'soft', 'shiny', 'ran', 'laughed', 'happy'.\n"
+        "4. Include one colour and one sound in the story.\n"
+        "5. Tone: " + style + ".\n"
+        "6. End with one warm, happy sentence.\n"
+        "7. Total length: 60 to 80 words.\n\n"
         "Story:"
     )
 
@@ -258,7 +258,7 @@ def _run_story(rich_caption: str, style: str) -> str:
             prompt,
             max_new_tokens=220,
             min_new_tokens=60,
-            num_beams=5,
+            num_beams=3,        # Plan C: lower beams → avoids rare high-prob literary tokens
             no_repeat_ngram_size=3,
             repetition_penalty=1.3,
             early_stopping=True,
