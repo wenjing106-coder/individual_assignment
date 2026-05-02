@@ -160,10 +160,13 @@ Strict requirements:
 - Make it gentle, fun, and easy to understand.
 - Avoid scary, violent, sad, or inappropriate content.
 - The story must have a clear beginning, middle, and happy ending.
-- Write only the story.
+- Output only the story.
 - Do not write a title.
 - Do not write bullet points.
 - Do not write fewer than 60 words.
+- Do not repeat the rules.
+- Do not mention word limits.
+- Do not mention style instructions.
 
 Style:
 {style_instruction}
