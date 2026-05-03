@@ -616,7 +616,7 @@ def render_header(style_label: str = "Warm & Happy 😊") -> None:
                 margin: 0.5rem 0 0 0;
                 font-size: 1.05rem;
                 color: #555;
-            ">Upload a picture and create a fun story for kids! ✨</p>
+            ">Select story style at Sidebar & Upload a picture and create a fun story for kids! ✨</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -687,7 +687,7 @@ def render_sidebar() -> Tuple[str, bool, bool]:
             text-align: center;
         ">
             <span style="font-size: 1.4rem;">⚙️</span>
-            <span style="font-weight: 700; font-size: 1rem; color: #2d2d2d;">
+            <span style="font-weight: 700; font-size: 1.4rem; color: #2d2d2d;">
               &nbsp;Story Settings
             </span>
         </div>
