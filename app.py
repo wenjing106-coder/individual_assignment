@@ -77,8 +77,8 @@ st.set_page_config(
 #                     set slightly below TARGET_MAX_WORDS to leave a margin.
 # ---------------------------------------------------------------------------
 TARGET_MIN_WORDS: int = 50
-TARGET_MAX_WORDS: int = 120
-TARGET_HARD_MAX: int  = 110
+TARGET_MAX_WORDS: int = 110
+TARGET_HARD_MAX: int  = 100
 
 # ---------------------------------------------------------------------------
 # Model identifiers
@@ -147,9 +147,9 @@ STYLE_OPTIONS: Dict[str, Tuple[str, str]] = {
 # colour theme changes automatically when the user picks a different style.
 # ---------------------------------------------------------------------------
 STYLE_GRADIENTS: Dict[str, str] = {
-    "Warm & Happy 😊": "linear-gradient(135deg, #FFECD2 0%, #FCB69F 100%)",
-    "Adventure 🚀":    "linear-gradient(135deg, #A1C4FD 20%, #C2E9FB 100%)",
-    "Bedtime 🌙":      "linear-gradient(135deg, #D4B3F5 0%, #8EC5FC 100%)",
+    "Warm & Happy 😊": "linear-gradient(135deg, #D4B3F5 0%, #8EC5FC 100% )",
+    "Adventure 🚀":    "linear-gradient(135deg, #FFECD2 0%, #FCB69F 100% )",
+    "Bedtime 🌙":      "linear-gradient(135deg, #C2E9FB 100%,#A1C4FD 20% )",
 }
 
 # Fallback gradient used when a style key is not found in STYLE_GRADIENTS.
@@ -758,7 +758,7 @@ def render_footer() -> None:
     st.markdown("---")
     st.markdown(
         "<p style='text-align: center; color: #888; font-size: 0.82rem;'>"
-        "Built with ❤️ using "
+        "Built with using "
         "<b>Streamlit</b> · <b>GIT-base-COCO</b> · "
         "<b>Qwen2.5-0.5B-Instruct</b> · <b>gTTS</b>"
         "</p>",
@@ -916,7 +916,7 @@ def main() -> None:
 
     with col_download_text:
         st.download_button(
-            label="📄 Story",
+            label="📄 Download Your Story",
             data=final_story,
             file_name="story.txt",
             mime="text/plain",
@@ -925,7 +925,7 @@ def main() -> None:
 
     with col_download_audio:
         st.download_button(
-            label="🎵 Audio",
+            label="🎵 Download Your Audio",
             data=audio_bytes,
             file_name="story.mp3",
             mime="audio/mpeg",
