@@ -616,7 +616,7 @@ def render_header(style_label: str = "Warm & Happy 😊") -> None:
                 margin: 0.5rem 0 0 0;
                 font-size: 1.05rem;
                 color: #555;
-            ">Select story style at Sidebar & Upload a picture and create a fun story for kids! ✨</p>
+            ">Select story style in the sidebar & Upload a picture and create a fun story for kids! ✨</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -808,35 +808,8 @@ def main() -> None:
 
     # Guard: no file yet – show style-reminder banner and friendly prompt, then stop.
     if uploaded_file is None:
-        # Remind the user to choose a story style in the sidebar before uploading.
         # The banner is shown only at this stage so it does not clutter the
         # results view after a story has been generated.
-        st.markdown(
-            f"""
-            <div style="
-                background: {STYLE_GRADIENTS.get(selected_style_label, DEFAULT_GRADIENT)};
-                border-radius: 12px;
-                padding: 0.9rem 1.4rem;
-                margin: 0.6rem 0 1rem 0;
-                display: flex;
-                align-items: center;
-                gap: 0.8rem;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.07);
-            ">
-                <span style="font-size: 1.6rem; flex-shrink: 0;">👈</span>
-                <div>
-                    <strong style="color: #2d2d2d; font-size: 0.97rem;">
-                        Step 1 — Pick your story style in the sidebar
-                    </strong><br>
-                    <span style="color: #555; font-size: 0.87rem;">
-                        Choose <em>Warm &amp; Happy</em>, <em>Adventure</em>, or
-                        <em>Bedtime</em> on the left, then upload your picture below.
-                    </span>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
         st.info("📸 Upload a picture above to begin your story adventure! 🌟")
         render_footer()
         return
