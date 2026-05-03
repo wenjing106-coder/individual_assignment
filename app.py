@@ -744,7 +744,7 @@ def render_upload_area() -> None:
                 Drag &amp; drop your picture here, or click the button below
                 <br>
                 <span style="color: #aaa; font-size: 0.85rem;">
-                    PNG · JPG · WEBP supported
+                    PNG · JPG ·JPEG · WEBP supported
                 </span>
             </p>
         </div>
