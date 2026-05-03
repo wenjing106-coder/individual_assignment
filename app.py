@@ -30,25 +30,8 @@ TARGET_MAX_WORDS = 120
 TARGET_HARD_MAX  = 110   # sentence-boundary hard-truncation ceiling
 
 # ── Model identifiers ────────────────────────────────────────────────────────
-# Caption  : microsoft/git-base-coco — 182 M params, ~728 MB fp32
-#            GIT (Generative Image-to-Text) decoder conditioned on CLIP
-#            visual tokens; fine-tuned on COCO.  Generates scene-aware
-#            captions such as "a boy in a red jacket running through a
-#            sunlit park".  Loaded first, freed before story LLM loads.
 CAPTION_MODEL_NAME = "microsoft/git-base-coco"
-
-# Story    : Qwen/Qwen2.5-0.5B-Instruct — 494 M params, ~500 MB fp16
-#            Decoder-only causal LM with instruction fine-tuning.
-#            Unlike seq2seq models (T5, LaMini), a decoder LM never
-#            "regurgitates" prompt rules into the output — it simply
-#            continues the conversation.  The chat-template interface
-#            separates system/user/assistant roles cleanly, so the model
-#            receives a concise scene description and returns a story.
-#            Loaded after caption model freed; peak RAM ≈ 728 MB ✅
-STORY_MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
-
-# TTS      : gTTS — zero local RAM (HTTPS call to Google TTS).
-#            Streamlit Cloud allows outbound HTTPS; no WebSocket needed.
+STORY_MODEL_NAME   = "Qwen/Qwen2.5-0.5B-Instruct"
 TTS_LANG = "en"
 TTS_SLOW = False
 
@@ -73,6 +56,13 @@ STYLE_OPTIONS: Dict[str, str] = {
     ),
 }
 
+# ── Gradient colours per style ───────────────────────────────────────────────
+STYLE_GRADIENTS: Dict[str, str] = {
+    "Warm & Happy 😊": "linear-gradient(135deg, #FFECD2 0%, #FCB69F 100%)",
+    "Adventure 🚀":    "linear-gradient(135deg, #A1C4FD 0%, #C2E9FB 100%)",
+    "Bedtime 🌙":      "linear-gradient(135deg, #D4B3F5 0%, #8EC5FC 100%)",
+}
+
 
 # =========================================================
 # 2. UTILITY FUNCTIONS
@@ -82,8 +72,6 @@ def count_words(text: str) -> int:
 
 
 def contains_unsafe_content(text: str) -> bool:
-    # Whole-word matching — avoids false positives on substrings
-    # (e.g. "dead" inside "instead").
     lowered = text.lower()
     return any(
         re.search(r'\b' + re.escape(term) + r'\b', lowered)
@@ -114,11 +102,6 @@ def safe_open_image(uploaded_file) -> Image.Image:
 
 
 def _truncate_at_sentence_boundary(text: str, max_words: int) -> str:
-    """
-    Keep only complete sentences that fit within *max_words* total.
-    Falls back to a word-level cut with a closing period if no sentence
-    boundary exists within the limit.
-    """
     sentences = re.split(r'(?<=[.!?])\s+', text.strip())
     kept, total = [], 0
     for sent in sentences:
@@ -130,7 +113,6 @@ def _truncate_at_sentence_boundary(text: str, max_words: int) -> str:
             break
     if kept:
         return " ".join(kept)
-    # fallback: word-level truncation
     words = text.split()
     cut = " ".join(words[:max_words]).rstrip(",;:-")
     return cut if cut.endswith((".", "!", "?")) else cut + "."
@@ -139,21 +121,7 @@ def _truncate_at_sentence_boundary(text: str, max_words: int) -> str:
 # =========================================================
 # 3. STEP-WISE MODEL EXECUTION  (load → run → free)
 # =========================================================
-# Memory budget on Streamlit Cloud free tier (~1 GB usable RAM)
-# ──────────────────────────────────────────────────────────────
-# Models are loaded sequentially and freed immediately after use:
-#
-#   Step 1  git-base-coco (caption)    ~728 MB  → del + gc
-#   Step 2  Qwen2.5-0.5B-Instruct fp16 ~500 MB  → del + gc
-#   Step 3  gTTS (HTTPS, no local RAM)   ~0 MB
-#
-#   Peak RAM = max(728, 500) = 728 MB  ✅  (well under 1 GB)
-
 def _run_caption(image: Image.Image) -> str:
-    """
-    Load microsoft/git-base-coco, caption the image, free the model.
-    ~728 MB peak RAM, released before story generation begins.
-    """
     pipe = pipeline(
         task="image-to-text",
         model=CAPTION_MODEL_NAME,
@@ -170,26 +138,6 @@ def _run_caption(image: Image.Image) -> str:
 
 def _build_chat_messages(caption: str, style_tone: str,
                           style_ending: str) -> list:
-    """
-    Build the chat-template message list for Qwen2.5-0.5B-Instruct.
-
-    G2 design rationale
-    ───────────────────
-    Qwen2.5-0.5B-Instruct is a decoder-only causal LM with instruction
-    fine-tuning.  Its chat template separates system / user / assistant
-    roles so the model never confuses "instructions" with "story output".
-
-    The system message establishes a children's author persona with clear
-    vocabulary and length constraints.  The user message provides only
-    the scene — a short, focused input that leaves no room for the model
-    to leak prompt text back.
-
-    Crucially we do NOT embed style descriptions or word-count rules as
-    numbered rules inside the user turn — doing so caused LaMini to copy
-    the rule text verbatim.  Instead, all structural constraints live in
-    the system message, which Qwen treats as background context rather
-    than content to reproduce.
-    """
     system_msg = (
         "You are a kind and imaginative children's storyteller. "
         "When given a scene description, you write a short, original story "
@@ -211,34 +159,6 @@ def _build_chat_messages(caption: str, style_tone: str,
 
 
 def _run_story(caption: str, style_label: str) -> str:
-    """
-    G2 — Qwen2.5-0.5B-Instruct with chat template
-    ───────────────────────────────────────────────
-    Load Qwen2.5-0.5B-Instruct in fp16, generate the story via the
-    official chat-template interface, then free the model.
-
-    Why Qwen2.5-0.5B-Instruct outperforms LaMini / flan-t5:
-    • Decoder-only architecture: the model appends to the assistant turn
-      rather than transforming input text, so prompt rules never appear
-      in the output.
-    • Instruction fine-tuning on diverse creative tasks: the model
-      genuinely understands "write a children's story" and honours
-      length / style constraints without repeating them.
-    • fp16 weight loading keeps peak RAM at ~500 MB — safely within the
-      728 MB already occupied by the caption step.
-
-    Generation parameters chosen for story quality:
-    • do_sample=True, temperature=0.8  — controlled creativity without
-      wild hallucinations; deterministic beam search on a small model
-      tends to produce repetitive high-probability phrases.
-    • top_p=0.9                        — nucleus sampling filters the
-      very long tail of low-probability tokens.
-    • repetition_penalty=1.15          — mild penalty keeps successive
-      sentences from starting with the same phrase.
-    • max_new_tokens=180               — generous ceiling; constraint
-      enforcement trims if needed.
-    • min_new_tokens=60                — prevents a one-sentence output.
-    """
     style_tone, style_ending = STYLE_OPTIONS[style_label]
     messages = _build_chat_messages(caption, style_tone, style_ending)
 
@@ -249,7 +169,6 @@ def _run_story(caption: str, style_label: str) -> str:
         device_map="cpu",
     )
     try:
-        # Apply Qwen's built-in chat template to format the messages
         text = tokenizer.apply_chat_template(
             messages,
             tokenize=False,
@@ -270,7 +189,6 @@ def _run_story(caption: str, style_label: str) -> str:
                 pad_token_id=tokenizer.eos_token_id,
             )
 
-        # Decode only the newly generated tokens (strip the prompt)
         new_tokens = output_ids[0][input_len:]
         story = tokenizer.decode(new_tokens, skip_special_tokens=True)
         return clean_text(story)
@@ -280,10 +198,6 @@ def _run_story(caption: str, style_label: str) -> str:
 
 
 def _run_tts(text: str) -> bytes:
-    """
-    Convert text to MP3 bytes via gTTS (Google TTS HTTPS API).
-    Zero local model RAM.  Streamlit Cloud allows outbound HTTPS.
-    """
     tts = gTTS(text=text, lang=TTS_LANG, slow=TTS_SLOW)
     buf = io.BytesIO()
     tts.write_to_fp(buf)
@@ -292,16 +206,9 @@ def _run_tts(text: str) -> bytes:
 
 
 # =========================================================
-# 4. CONSTRAINT ENFORCEMENT  (no extra LLM calls)
+# 4. CONSTRAINT ENFORCEMENT
 # =========================================================
 def enforce_story_constraints(story: str) -> Tuple[str, Optional[str]]:
-    """
-    Pure post-processing: no further model calls.
-
-    1. Unsafe content   → guaranteed-safe fallback sentence.
-    2. Over hard limit  → sentence-boundary truncation.
-    3. Under minimum    → informational warning only (story still shown).
-    """
     current = clean_text(story)
     warning: Optional[str] = None
 
@@ -329,30 +236,113 @@ def enforce_story_constraints(story: str) -> Tuple[str, Optional[str]]:
 # =========================================================
 # 5. UI HELPERS
 # =========================================================
-def render_header() -> None:
-    st.title(APP_TITLE)
-    st.caption(APP_SUBTITLE)
-    st.write(
-        "Upload a picture and watch it become a magical story — "
-        "read aloud just for you! ✨"
+
+# ── U1: Gradient banner ───────────────────────────────────────────────────────
+def render_header(style_label: str = "Warm & Happy 😊") -> None:
+    gradient = STYLE_GRADIENTS.get(style_label, STYLE_GRADIENTS["Warm & Happy 😊"])
+    st.markdown(
+        f"""
+        <div style="
+            background: {gradient};
+            border-radius: 16px;
+            padding: 2rem 2.5rem 1.5rem 2.5rem;
+            margin-bottom: 1.5rem;
+            text-align: center;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+        ">
+            <div style="font-size: 3rem; margin-bottom: 0.3rem;">🌈</div>
+            <h1 style="
+                margin: 0;
+                font-size: 2.2rem;
+                font-weight: 800;
+                color: #2d2d2d;
+                letter-spacing: -0.5px;
+            ">Magic Story Maker</h1>
+            <p style="
+                margin: 0.5rem 0 0 0;
+                font-size: 1.05rem;
+                color: #555;
+            ">Upload a picture and create a fun story for kids! ✨</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
 
+# ── U2: Story card ────────────────────────────────────────────────────────────
+def render_story_card(story: str, style_label: str) -> None:
+    gradient = STYLE_GRADIENTS.get(style_label, STYLE_GRADIENTS["Warm & Happy 😊"])
+    st.markdown(
+        f"""
+        <div style="
+            background: {gradient};
+            border-radius: 14px;
+            border-left: 6px solid rgba(0,0,0,0.12);
+            padding: 1.4rem 1.8rem;
+            margin: 0.5rem 0 1.2rem 0;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.07);
+            font-size: 1.08rem;
+            line-height: 1.75;
+            color: #2d2d2d;
+        ">
+            {story}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# ── U4: Sidebar redesign ──────────────────────────────────────────────────────
 def render_sidebar() -> Tuple[str, bool, bool]:
-    st.sidebar.header("⚙️ Story Settings")
-    story_style = st.sidebar.selectbox(
-        "Choose a story style",
-        list(STYLE_OPTIONS.keys()),
+    st.sidebar.markdown(
+        """
+        <div style="
+            background: linear-gradient(135deg,#FFECD2,#FCB69F);
+            border-radius: 12px;
+            padding: 0.8rem 1rem;
+            margin-bottom: 1rem;
+            text-align: center;
+        ">
+            <span style="font-size:1.4rem;">⚙️</span>
+            <span style="font-weight:700; font-size:1rem; color:#2d2d2d;">
+              &nbsp;Story Settings
+            </span>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
-    show_caption = st.sidebar.checkbox("Show image caption", value=True)
-    show_debug   = st.sidebar.checkbox("Show debug info",   value=False)
+
+    # Radio buttons for style selection (U4)
+    story_style = st.sidebar.radio(
+        "🎨 Story Style",
+        list(STYLE_OPTIONS.keys()),
+        horizontal=False,
+        index=0,
+    )
+
+    st.sidebar.markdown("---")
+
+    # Expander keeps advanced options out of the way (U4)
+    with st.sidebar.expander("🔧 Advanced Options", expanded=False):
+        show_caption = st.checkbox(
+            "Show image caption", value=True, key="show_caption_cb"
+        )
+        show_debug = st.checkbox(
+            "Show debug info", value=False, key="show_debug_cb"
+        )
+
     return story_style, show_caption, show_debug
 
 
 def render_footer() -> None:
     st.markdown("---")
-    st.caption(
-        "Built with Streamlit · GIT-base-COCO · Qwen2.5-0.5B-Instruct · gTTS"
+    st.markdown(
+        "<p style='text-align:center; color:#888; font-size:0.82rem;'>"
+        "Built with ❤️ using "
+        "<b>Streamlit</b> · <b>GIT-base-COCO</b> · "
+        "<b>Qwen2.5-0.5B-Instruct</b> · <b>gTTS</b>"
+        "</p>",
+        unsafe_allow_html=True,
     )
 
 
@@ -360,16 +350,42 @@ def render_footer() -> None:
 # 6. MAIN APP LOGIC
 # =========================================================
 def main() -> None:
-    render_header()
+    # We need style early for the gradient banner, but sidebar must render first
+    # so we render sidebar, capture style, then render header.
     story_style_label, show_caption, show_debug = render_sidebar()
+    render_header(story_style_label)
+
+    # ── U6: Upload area beautification ───────────────────────────────────────
+    st.markdown(
+        """
+        <div style="
+            background: #f9f9f9;
+            border: 2px dashed #d0d0d0;
+            border-radius: 14px;
+            padding: 1.2rem 1.5rem 0.8rem 1.5rem;
+            margin-bottom: 0.5rem;
+            text-align: center;
+        ">
+            <div style="font-size: 2rem;">🖼️</div>
+            <p style="margin: 0.3rem 0 0 0; color: #666; font-size: 0.95rem;">
+                Drag &amp; drop your picture here, or click the button below
+                <br><span style="color:#aaa; font-size:0.85rem;">
+                    PNG · JPG · WEBP supported
+                </span>
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     uploaded_file = st.file_uploader(
-        "Upload an image",
+        "Choose an image",
         type=["png", "jpg", "jpeg", "webp"],
+        label_visibility="collapsed",
     )
 
     if uploaded_file is None:
-        st.info("Upload a picture to begin your story adventure! 🌟")
+        st.info("📸 Upload a picture above to begin your story adventure! 🌟")
         render_footer()
         return
 
@@ -388,79 +404,112 @@ def main() -> None:
 
     st.image(image, caption="Your uploaded image", use_container_width=True)
 
-    if not st.button("✨ Create My Story"):
+    if not st.button("✨ Create My Story", use_container_width=True, type="primary"):
         render_footer()
         return
 
+    # ── U3: Step progress indicator ──────────────────────────────────────────
+    progress_bar  = st.progress(0, text="Starting…")
+    status_text   = st.empty()
+
     # ── Step 1: Caption ──────────────────────────────────────────────────────
-    with st.spinner("🔍 Reading the picture…"):
-        start = time.time()
-        raw_caption = _run_caption(image)
-        t_caption = time.time() - start
+    status_text.markdown(
+        "**Step 1 / 3** &nbsp;🔍&nbsp; Reading the picture…",
+        unsafe_allow_html=True,
+    )
+    progress_bar.progress(5, text="Step 1 / 3 — Reading the picture…")
+
+    start = time.time()
+    raw_caption = _run_caption(image)
+    t_caption = time.time() - start
+
+    progress_bar.progress(35, text="Step 1 / 3 — Done ✅")
 
     if show_caption:
-        st.subheader("🖼️ Image Caption")
-        st.write(raw_caption)
+        with st.expander("🖼️ Image Caption", expanded=True):
+            st.write(raw_caption)
 
-    # ── Step 2: Story generation (G2 — Qwen2.5-0.5B-Instruct) ───────────────
-    with st.spinner("📝 Writing your story…"):
-        t0 = time.time()
-        raw_story = _run_story(raw_caption, story_style_label)
-        t_story = time.time() - t0
+    # ── Step 2: Story generation ─────────────────────────────────────────────
+    status_text.markdown(
+        "**Step 2 / 3** &nbsp;📝&nbsp; Writing your story…",
+        unsafe_allow_html=True,
+    )
+    progress_bar.progress(40, text="Step 2 / 3 — Writing your story…")
+
+    t0 = time.time()
+    raw_story = _run_story(raw_caption, story_style_label)
+    t_story = time.time() - t0
 
     final_story, warning_message = enforce_story_constraints(raw_story)
+    progress_bar.progress(75, text="Step 2 / 3 — Done ✅")
 
     # ── Step 3: TTS ──────────────────────────────────────────────────────────
-    with st.spinner("🔊 Recording the story…"):
-        t0 = time.time()
-        audio_bytes = _run_tts(final_story)
-        t_tts = time.time() - t0
+    status_text.markdown(
+        "**Step 3 / 3** &nbsp;🔊&nbsp; Recording the story…",
+        unsafe_allow_html=True,
+    )
+    progress_bar.progress(80, text="Step 3 / 3 — Recording the story…")
+
+    t0 = time.time()
+    audio_bytes = _run_tts(final_story)
+    t_tts = time.time() - t0
+
+    progress_bar.progress(100, text="All done! 🎉")
+    status_text.empty()   # clear the step label once finished
 
     # ── Output ────────────────────────────────────────────────────────────────
     elapsed    = t_caption + t_story + t_tts
     word_count = count_words(final_story)
 
-    st.success("Your story is ready! 🎉")
+    st.success(f"Your story is ready! 🎉 ({word_count} words, {elapsed:.0f} s)")
 
     if warning_message:
         st.info(warning_message)
 
-    st.subheader("📖 Story")
-    st.write(final_story)
+    # U2: Story displayed in a styled card
+    st.markdown("### 📖 Your Story")
+    render_story_card(final_story, story_style_label)
 
-    st.subheader("🔊 Listen")
-    st.audio(audio_bytes, format="audio/mp3")
+    # ── U5: Audio + downloads in a single row (3 columns) ────────────────────
+    st.markdown("### 🔊 Listen & Download")
+    col_audio, col_dl_txt, col_dl_mp3 = st.columns([3, 1, 1])
 
-    col1, col2 = st.columns(2)
-    with col1:
+    with col_audio:
+        st.audio(audio_bytes, format="audio/mp3")
+
+    with col_dl_txt:
         st.download_button(
-            label="📥 Download Story",
+            label="📄 Story",
             data=final_story,
             file_name="story.txt",
             mime="text/plain",
+            use_container_width=True,
         )
-    with col2:
+
+    with col_dl_mp3:
         st.download_button(
-            label="📥 Download Audio",
+            label="🎵 Audio",
             data=audio_bytes,
             file_name="story.mp3",
             mime="audio/mpeg",
+            use_container_width=True,
         )
 
+    # ── Debug info ───────────────────────────────────────────────────────────
     if show_debug:
-        st.markdown("### 🛠 Debug Info")
-        st.write({
-            "caption_model": CAPTION_MODEL_NAME,
-            "story_model":   STORY_MODEL_NAME,
-            "story_arch":    "G2 chat-template (single call)",
-            "raw_caption":   raw_caption,
-            "word_count":    word_count,
-            "t_caption_s":   round(t_caption, 1),
-            "t_story_s":     round(t_story, 1),
-            "t_tts_s":       round(t_tts, 1),
-            "total_s":       round(elapsed, 1),
-            "style":         story_style_label,
-        })
+        with st.expander("🛠 Debug Info", expanded=False):
+            st.write({
+                "caption_model": CAPTION_MODEL_NAME,
+                "story_model":   STORY_MODEL_NAME,
+                "story_arch":    "G2 chat-template (single call)",
+                "raw_caption":   raw_caption,
+                "word_count":    word_count,
+                "t_caption_s":   round(t_caption, 1),
+                "t_story_s":     round(t_story, 1),
+                "t_tts_s":       round(t_tts, 1),
+                "total_s":       round(elapsed, 1),
+                "style":         story_style_label,
+            })
 
     if word_count < TARGET_MIN_WORDS or word_count > TARGET_MAX_WORDS:
         st.warning(
