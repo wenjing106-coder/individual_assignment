@@ -149,7 +149,7 @@ STYLE_OPTIONS: Dict[str, Tuple[str, str]] = {
 STYLE_GRADIENTS: Dict[str, str] = {
     "Warm & Happy 😊": "linear-gradient(135deg, #D4B3F5 0%, #8EC5FC 100% )",
     "Adventure 🚀":    "linear-gradient(135deg, #FFECD2 0%, #FCB69F 100% )",
-    "Bedtime 🌙":      "linear-gradient(135deg, #C2E9FB 100%, #A1C4FD 20% )",
+    "Bedtime 🌙":      "linear-gradient(135deg, #A1C4FD 20%, #C2E9FB 100% )",
 }
 
 # Fallback gradient used when a style key is not found in STYLE_GRADIENTS.
