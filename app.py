@@ -806,8 +806,37 @@ def main() -> None:
         label_visibility="collapsed",  # The hint div above acts as the label
     )
 
-    # Guard: no file yet – show a friendly prompt and stop.
+    # Guard: no file yet – show style-reminder banner and friendly prompt, then stop.
     if uploaded_file is None:
+        # Remind the user to choose a story style in the sidebar before uploading.
+        # The banner is shown only at this stage so it does not clutter the
+        # results view after a story has been generated.
+        st.markdown(
+            f"""
+            <div style="
+                background: {STYLE_GRADIENTS.get(selected_style_label, DEFAULT_GRADIENT)};
+                border-radius: 12px;
+                padding: 0.9rem 1.4rem;
+                margin: 0.6rem 0 1rem 0;
+                display: flex;
+                align-items: center;
+                gap: 0.8rem;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.07);
+            ">
+                <span style="font-size: 1.6rem; flex-shrink: 0;">👈</span>
+                <div>
+                    <strong style="color: #2d2d2d; font-size: 0.97rem;">
+                        Step 1 — Pick your story style in the sidebar
+                    </strong><br>
+                    <span style="color: #555; font-size: 0.87rem;">
+                        Choose <em>Warm &amp; Happy</em>, <em>Adventure</em>, or
+                        <em>Bedtime</em> on the left, then upload your picture below.
+                    </span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
         st.info("📸 Upload a picture above to begin your story adventure! 🌟")
         render_footer()
         return
@@ -829,8 +858,38 @@ def main() -> None:
 
     st.image(pil_image, caption="Your uploaded image", use_container_width=True)
 
-    # Primary action button (U6: primary style + full width)
-    if not st.button("✨ Create My Story", use_container_width=True, type="primary"):
+    # Action button styled with a muted sage-green (#7A9E87) instead of
+    # Streamlit's default high-saturation red/orange primary colour.
+    # We target the button by a stable data-testid + key attribute pair:
+    # Streamlit sets `data-testid="baseButton-secondary"` on default buttons
+    # and inserts the `key` value as the element's `id`, so the selector
+    # `#create_story_btn` is both unique and version-stable.
+    st.markdown(
+        """
+        <style>
+        /* Muted sage-green for the Create My Story button only.
+           The key="create_story_btn" causes Streamlit to render the button
+           inside a wrapper whose immediate <button> child carries that key
+           in its aria-label, making this selector precise and safe. */
+        div[data-testid="stButton"]:has(> button[data-testid="baseButton-secondary"])
+            > button[aria-label="✨ Create My Story"],
+        div[data-testid="stButton"]
+            > button[data-testid="baseButton-secondary"] {
+            background-color: #7A9E87 !important;
+            color: #ffffff !important;
+            border: 1px solid #6A8E77 !important;
+        }
+        div[data-testid="stButton"]
+            > button[data-testid="baseButton-secondary"]:hover {
+            background-color: #6A8E77 !important;
+            border-color: #5A7E67 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    if not st.button("✨ Create My Story", use_container_width=True,
+                     key="create_story_btn"):
         render_footer()
         return
 
