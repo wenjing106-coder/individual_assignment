@@ -656,23 +656,27 @@ def render_story_card(story_text: str, style_label: str) -> None:
     )
 
 
-def render_sidebar() -> Tuple[bool, bool]:
-    """Render the sidebar containing only the Advanced Options expander.
+def render_sidebar() -> Tuple[str, bool, bool]:
+    """Render the sidebar with style selection and advanced options (U4).
 
-    The story style selector has been moved to the main page
-    (``render_style_selector``) so the primary workflow is fully visible
-    without opening the sidebar.  The sidebar now acts as a lightweight
-    settings panel for less-frequently used toggles.
+    Layout:
+    - A decorative gradient banner heading.
+    - A radio button group for story style (replaces the previous selectbox
+      so all three options are visible at a glance without a dropdown).
+    - A collapsed expander for less-frequently used options (caption display
+      and debug info), keeping the sidebar uncluttered by default.
 
-    Widget keys (``key=`` parameter) ensure Streamlit preserves checkbox
-    state correctly across reruns triggered by other widgets.
+    Widget keys (``key=`` parameter) are required for checkboxes inside
+    ``st.expander`` to ensure Streamlit preserves their state correctly
+    across reruns triggered by other widgets.
 
     Returns:
-        A 2-tuple ``(show_image_caption, show_debug_panel)`` where:
-        - ``show_image_caption`` is True if the raw caption should be shown.
-        - ``show_debug_panel``   is True if the debug info panel should be shown.
+        A 3-tuple ``(story_style_label, show_caption, show_debug)`` where:
+        - ``story_style_label`` is the selected key from STYLE_OPTIONS.
+        - ``show_caption``      is True if the image caption should be shown.
+        - ``show_debug``        is True if the debug info panel should be shown.
     """
-    # Decorative sidebar header
+    # Decorative sidebar header banner
     st.sidebar.markdown(
         """
         <div style="
@@ -684,139 +688,69 @@ def render_sidebar() -> Tuple[bool, bool]:
         ">
             <span style="font-size: 1.4rem;">⚙️</span>
             <span style="font-weight: 700; font-size: 1rem; color: #2d2d2d;">
-              &nbsp;Advanced Options
+              &nbsp;Story Settings
             </span>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    # Advanced toggles – shown directly (no expander needed now that
-    # the style selector has moved to the main page).
-    show_image_caption = st.sidebar.checkbox(
-        "Show image caption",
-        value=True,
-        key="show_caption_cb",  # Stable key preserves state across reruns
-    )
-    show_debug_panel = st.sidebar.checkbox(
-        "Show debug info",
-        value=False,
-        key="show_debug_cb",
+    # Radio group: one visible option per style (U4)
+    selected_style = st.sidebar.radio(
+        "🎨 Story Style",
+        options=list(STYLE_OPTIONS.keys()),
+        horizontal=False,  # Vertical layout suits the narrow sidebar width
+        index=0,
     )
 
-    return show_image_caption, show_debug_panel
+    st.sidebar.markdown("---")
+
+    # Collapsed expander hides rarely-needed options from the default view
+    with st.sidebar.expander("🔧 Advanced Options", expanded=False):
+        show_image_caption = st.checkbox(
+            "Show image caption",
+            value=True,
+            key="show_caption_cb",  # Stable key preserves state across reruns
+        )
+        show_debug_panel = st.checkbox(
+            "Show debug info",
+            value=False,
+            key="show_debug_cb",
+        )
+
+    return selected_style, show_image_caption, show_debug_panel
 
 
-def render_style_selector() -> str:
-    """Render the story-style selector as three styled buttons on the main page.
+def render_upload_area() -> None:
+    """Render a decorative dashed-border hint above the file uploader (U6).
 
-    Displays one button per style in a three-column grid.  Each button is
-    styled via a scoped ``<style>`` block that targets its unique
-    ``key``-derived id (``#style_btn_<index>``).  The active style receives
-    the matching gradient background; inactive styles use a plain white
-    background with a light grey border.
-
-    Clicking a button writes the chosen label to
-    ``st.session_state["selected_style"]`` and calls ``st.rerun()`` so the
-    header banner gradient and card highlight update immediately.
-
-    This function injects CSS **once** (outside the column loop) using a
-    single ``<style>`` block that covers all three buttons, keeping the
-    DOM clean and avoiding the duplicate-rule issue that arises when the
-    same ``<style>`` tag is re-injected inside each column.
-
-    Returns:
-        The selected style label string (a key from ``STYLE_OPTIONS``).
+    Uses an HTML ``<div>`` with a dashed border and centred text to create
+    a recognisable drop-zone visual that guides users (including children's
+    parents) to upload their picture.  The actual Streamlit file uploader
+    widget follows immediately beneath this hint box.
     """
-    style_labels = list(STYLE_OPTIONS.keys())
-
-    # Initialise session state on the very first run.
-    if "selected_style" not in st.session_state:
-        st.session_state["selected_style"] = style_labels[0]
-
-    # Per-style display metadata (emoji + short description shown on the button).
-    style_meta = {
-        "Warm & Happy 😊": {"emoji": "😊", "desc": "Cheerful & warm"},
-        "Adventure 🚀":    {"emoji": "🚀", "desc": "Exciting & playful"},
-        "Bedtime 🌙":      {"emoji": "🌙", "desc": "Calm & soothing"},
-    }
-
     st.markdown(
-        "<p style='font-weight:600; font-size:0.97rem; "
-        "margin-bottom:0.5rem; color:#2d2d2d;'>🎨 Choose a Story Style</p>",
+        """
+        <div style="
+            background: #f9f9f9;
+            border: 2px dashed #d0d0d0;
+            border-radius: 14px;
+            padding: 1.2rem 1.5rem 0.8rem 1.5rem;
+            margin-bottom: 0.5rem;
+            text-align: center;
+        ">
+            <div style="font-size: 2rem;">🖼️</div>
+            <p style="margin: 0.3rem 0 0 0; color: #666; font-size: 0.95rem;">
+                Drag &amp; drop your picture here, or click the button below
+                <br>
+                <span style="color: #aaa; font-size: 0.85rem;">
+                    PNG · JPG · WEBP supported
+                </span>
+            </p>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
-
-    # ------------------------------------------------------------------
-    # Build one CSS rule per button keyed by its Streamlit-generated id.
-    # Streamlit renders ``st.button(..., key=k)`` as:
-    #   <div data-testid="stButton"><button id="k" ...>…</button></div>
-    # We use that id to scope the gradient / border to each card
-    # independently without touching any other button on the page.
-    # ------------------------------------------------------------------
-    css_rules: List[str] = []
-    for idx, label in enumerate(style_labels):
-        btn_key   = f"style_btn_{idx}"
-        is_active = st.session_state["selected_style"] == label
-        gradient  = STYLE_GRADIENTS.get(label, DEFAULT_GRADIENT)
-
-        if is_active:
-            bg          = gradient
-            border      = "2px solid rgba(0,0,0,0.20)"
-            text_color  = "#2d2d2d"
-            font_weight = "700"
-            shadow      = "0 3px 10px rgba(0,0,0,0.10)"
-        else:
-            bg          = "#ffffff"
-            border      = "1.5px solid #e0e0e0"
-            text_color  = "#555555"
-            font_weight = "400"
-            shadow      = "0 1px 4px rgba(0,0,0,0.05)"
-
-        css_rules.append(f"""
-            button#{btn_key} {{
-                background: {bg} !important;
-                border: {border} !important;
-                border-radius: 12px !important;
-                box-shadow: {shadow} !important;
-                color: {text_color} !important;
-                font-weight: {font_weight} !important;
-                padding: 0.7rem 0.4rem !important;
-                height: auto !important;
-                min-height: 0 !important;
-                width: 100% !important;
-                cursor: pointer !important;
-                transition: box-shadow 0.15s ease !important;
-                white-space: normal !important;
-                line-height: 1.4 !important;
-            }}
-            button#{btn_key}:hover {{
-                box-shadow: 0 4px 12px rgba(0,0,0,0.13) !important;
-                filter: brightness(0.97) !important;
-            }}
-        """)
-
-    # Inject all rules in a single <style> block (avoids duplicate tags).
-    st.markdown(
-        "<style>" + "".join(css_rules) + "</style>",
-        unsafe_allow_html=True,
-    )
-
-    # Render the three columns; each button label shows emoji + description.
-    col1, col2, col3 = st.columns(3)
-    for col, label, idx in zip([col1, col2, col3], style_labels, range(3)):
-        meta    = style_meta[label]
-        btn_key = f"style_btn_{idx}"
-        with col:
-            if st.button(
-                f"{meta['emoji']}\n{meta['desc']}",
-                key=btn_key,
-                use_container_width=True,
-            ):
-                st.session_state["selected_style"] = label
-                st.rerun()  # Re-render so active card updates immediately
-
-    return st.session_state["selected_style"]
 
 
 def render_footer() -> None:
@@ -840,80 +774,69 @@ def main() -> None:
     """Orchestrate the full Magic Story Maker workflow.
 
     Execution flow:
-        1. Render sidebar (Advanced Options only — style selector is on the
-           main page).
-        2. Render gradient banner header (gradient updates with chosen style).
-        3. Render style selector (three cards on main page) — Step 1.
-        4. Render Step-2 hint card + file uploader.
-        5. Validate the uploaded image; display it.
-        6. Wait for the user to press "Create My Story".
-        7. Run the three-step pipeline with a live progress bar:
+        1. Render sidebar (must precede header so the selected style is
+           available for the gradient banner colour).
+        2. Render gradient banner header.
+        3. Render upload area hint + file uploader widget.
+        4. Validate the uploaded image; display it.
+        5. Wait for the user to press "Create My Story".
+        6. Run the three-step pipeline with a live progress bar:
                Step 1/3 – Image captioning  (run_caption_model)
                Step 2/3 – Story generation  (run_story_model)
                Step 3/3 – Text-to-speech    (run_tts)
-        8. Post-process the story (enforce_story_constraints).
-        9. Display the story card, audio player, and download buttons.
-       10. Optionally show debug information.
-       11. Render footer.
+        7. Post-process the story (enforce_story_constraints).
+        8. Display the story card, audio player, and download buttons.
+        9. Optionally show debug information.
+       10. Render footer.
 
     Early-return guards are used after each validation step so that the
     main pipeline code is not indented inside nested ``if`` blocks.
     """
 
-    # --- Sidebar: advanced options only ---
-    show_image_caption, show_debug_panel = render_sidebar()
+    # --- Sidebar and header (sidebar first to capture style for gradient) ---
+    selected_style_label, show_image_caption, show_debug_panel = render_sidebar()
+    render_header(selected_style_label)
 
-    # --- Header banner (gradient driven by the currently selected style) ---
-    # Style is read from session_state so the header re-renders immediately
-    # whenever the user clicks a different style card.
-    current_style = st.session_state.get("selected_style", list(STYLE_OPTIONS.keys())[0])
-    render_header(current_style)
+    # --- Upload area (U6) ---
+    render_upload_area()
 
-    # --- Step 1: Style selector on the main page ---
-    # Rendered before the upload area so the user can choose a style first.
-    # Returns the newly selected label and updates session_state internally.
-    selected_style_label = render_style_selector()
-
-    st.markdown("<div style='margin-top:1.2rem;'></div>", unsafe_allow_html=True)
-
-    # --- Step 2 hint card: plain bordered card above the file uploader ---
-    # No gradient background – keeps the card visually neutral so it does
-    # not compete with the style cards rendered just above it.
-    st.markdown(
-        """
-        <div style="
-            background: #ffffff;
-            border: 1.5px solid #e0e0e0;
-            border-radius: 12px;
-            padding: 0.85rem 1.3rem;
-            margin-bottom: 0.6rem;
-            display: flex;
-            align-items: center;
-            gap: 0.8rem;
-        ">
-            <span style="font-size: 1.5rem; flex-shrink: 0;">📂</span>
-            <div>
-                <strong style="color: #2d2d2d; font-size: 0.95rem;">
-                    Step 2 — Upload your picture
-                </strong><br>
-                <span style="color: #777; font-size: 0.85rem;">
-                    Drag &amp; drop or click below to choose a PNG, JPG, or WEBP image.
-                </span>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # --- File uploader (no extra dashed hint div — the card above replaces it) ---
     uploaded_file = st.file_uploader(
         "Choose an image",
         type=["png", "jpg", "jpeg", "webp"],
-        label_visibility="collapsed",
+        label_visibility="collapsed",  # The hint div above acts as the label
     )
 
-    # Guard: no file yet – friendly prompt then stop.
+    # Guard: no file yet – show style-reminder banner and friendly prompt, then stop.
     if uploaded_file is None:
+        # Remind the user to choose a story style in the sidebar before uploading.
+        # The banner is shown only at this stage so it does not clutter the
+        # results view after a story has been generated.
+        st.markdown(
+            f"""
+            <div style="
+                background: {STYLE_GRADIENTS.get(selected_style_label, DEFAULT_GRADIENT)};
+                border-radius: 12px;
+                padding: 0.9rem 1.4rem;
+                margin: 0.6rem 0 1rem 0;
+                display: flex;
+                align-items: center;
+                gap: 0.8rem;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.07);
+            ">
+                <span style="font-size: 1.6rem; flex-shrink: 0;">👈</span>
+                <div>
+                    <strong style="color: #2d2d2d; font-size: 0.97rem;">
+                        Step 1 — Pick your story style in the sidebar
+                    </strong><br>
+                    <span style="color: #555; font-size: 0.87rem;">
+                        Choose <em>Warm &amp; Happy</em>, <em>Adventure</em>, or
+                        <em>Bedtime</em> on the left, then upload your picture below.
+                    </span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
         st.info("📸 Upload a picture above to begin your story adventure! 🌟")
         render_footer()
         return
@@ -935,20 +858,29 @@ def main() -> None:
 
     st.image(pil_image, caption="Your uploaded image", use_container_width=True)
 
-    # "Create My Story" button — muted sage-green (#7A9E87) styled via a
-    # CSS rule scoped to its unique key-derived id ``#create_story_btn``.
-    # This is the same technique used in render_style_selector and does
-    # not interfere with the style-card buttons (different ids).
+    # Action button styled with a muted sage-green (#7A9E87) instead of
+    # Streamlit's default high-saturation red/orange primary colour.
+    # We target the button by a stable data-testid + key attribute pair:
+    # Streamlit sets `data-testid="baseButton-secondary"` on default buttons
+    # and inserts the `key` value as the element's `id`, so the selector
+    # `#create_story_btn` is both unique and version-stable.
     st.markdown(
         """
         <style>
-        button#create_story_btn {
+        /* Muted sage-green for the Create My Story button only.
+           The key="create_story_btn" causes Streamlit to render the button
+           inside a wrapper whose immediate <button> child carries that key
+           in its aria-label, making this selector precise and safe. */
+        div[data-testid="stButton"]:has(> button[data-testid="baseButton-secondary"])
+            > button[aria-label="✨ Create My Story"],
+        div[data-testid="stButton"]
+            > button[data-testid="baseButton-secondary"] {
             background-color: #7A9E87 !important;
             color: #ffffff !important;
             border: 1px solid #6A8E77 !important;
-            font-weight: 600 !important;
         }
-        button#create_story_btn:hover {
+        div[data-testid="stButton"]
+            > button[data-testid="baseButton-secondary"]:hover {
             background-color: #6A8E77 !important;
             border-color: #5A7E67 !important;
         }
