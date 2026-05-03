@@ -615,7 +615,7 @@ def render_header(style_label: str = "Warm & Happy 😊") -> None:
             <p style="
                 margin: 0.5rem 0 0 0;
                 font-size: 1.05rem;
-                color: #555;
+                color: #3A3A3A;
             ">Select story style in the sidebar & Upload a picture and create a fun story for kids! ✨</p>
         </div>
         """,
