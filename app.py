@@ -599,13 +599,14 @@ def main() -> None:
     selected_style_label, show_image_caption, show_debug_panel = render_sidebar()
     render_header(selected_style_label)
 
-    # --- Upload area (U6) ---
-    render_upload_area()
-
+    # --- File uploader ---
+    # Using st.file_uploader directly without any decorative HTML div on top.
+    # Streamlit's native uploader has built-in drag-and-drop support; placing
+    # a separate HTML element above it caused users to drop files onto the
+    # inert div instead of the actual upload target, making drag-and-drop fail.
     uploaded_file = st.file_uploader(
-        "Choose an image",
+        "📂 Step 2 — Upload your picture (PNG · JPG · WEBP)",
         type=["png", "jpg", "jpeg", "webp"],
-        label_visibility="collapsed",  # The hint div above acts as the label
     )
 
     # Guard: no file yet – show style-reminder banner and friendly prompt, then stop.
