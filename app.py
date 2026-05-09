@@ -535,7 +535,7 @@ def render_upload_area() -> None:
         """
         <div style="
             background: #f9f9f9;
-            border: 2px dashed #d0d0d0;
+            border: 2px #d0d0d0;
             border-radius: 14px;
             padding: 1.2rem 1.5rem 0.8rem 1.5rem;
             margin-bottom: 0.5rem;
