@@ -543,7 +543,7 @@ def render_upload_area() -> None:
         ">
             <div style="font-size: 2rem;">🖼️</div>
             <p style="margin: 0.3rem 0 0 0; color: #666; font-size: 0.95rem;">
-                Drag &amp; drop your picture here, or click the button below
+                Drag &amp; drop your picture below or click the button below
                 <br>
                 <span style="color: #aaa; font-size: 0.85rem;">
                     PNG · JPG ·JPEG · WEBP supported
