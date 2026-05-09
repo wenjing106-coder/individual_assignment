@@ -1,4 +1,8 @@
 """
+ISOM5240 Individual Assignment
+Name: WEN Jing
+SID: 21121986
+
 Magic Story Maker
 =================
 A Streamlit web application that transforms any uploaded image into a
@@ -11,10 +15,6 @@ Pipeline (three sequential steps):
                            style (Warm & Happy / Adventure / Bedtime).
     3. Text-to-Speech    – gTTS converts the final story to an MP3 audio clip.
 
-Memory management strategy:
-    Each model is loaded, used, then immediately deleted and garbage-collected
-    so that at most one model occupies RAM at a time.  Peak usage is ~728 MB
-    (caption model), well within Streamlit Cloud's ~1 GB free-tier limit.
 
 Module layout:
     Section 1 – Page configuration and application-level constants.
@@ -25,7 +25,6 @@ Module layout:
     Section 6 – Main application orchestration function.
     Section 7 – Entry point guard.
 
-Author : Magic Story Maker Project
 """
 
 from __future__ import annotations
@@ -38,9 +37,6 @@ import io          # In-memory byte stream used for TTS audio buffer
 import re          # Regular expressions for word counting and text cleaning
 import time        # Wall-clock timing for performance debug display
 
-# ---------------------------------------------------------------------------
-# Type-hint helpers
-# ---------------------------------------------------------------------------
 from typing import Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
@@ -61,7 +57,6 @@ from transformers import (                                # Hugging Face models
 # SECTION 1 – PAGE CONFIGURATION AND APPLICATION CONSTANTS
 # ===========================================================================
 
-# Must be the first Streamlit call in the script.
 st.set_page_config(
     page_title="Magic Story Maker",
     page_icon="🌈",
@@ -69,7 +64,7 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------------------------------
-# Word-count targets
+# Word-count targets 50-110 words
 # TARGET_MIN_WORDS  : stories below this threshold trigger an informational
 #                     warning (story is still shown – never silently hidden).
 # TARGET_MAX_WORDS  : soft upper bound displayed in the word-count warning.
@@ -82,22 +77,6 @@ TARGET_HARD_MAX: int  = 100
 
 # ---------------------------------------------------------------------------
 # Model identifiers
-#
-# CAPTION_MODEL_NAME
-#   microsoft/git-base-coco  (~182 M parameters, ~728 MB fp32 RAM)
-#   GIT (Generative Image-to-Text) decoder conditioned on CLIP visual tokens,
-#   fine-tuned on the COCO dataset.  Produces scene-aware captions such as
-#   "a woman sitting in a golden carriage surrounded by swans".
-#   Loaded first; freed before the story model is instantiated.
-#
-# STORY_MODEL_NAME
-#   Qwen/Qwen2.5-0.5B-Instruct  (~494 M parameters, ~500 MB fp16 RAM)
-#   Decoder-only causal LM with instruction fine-tuning.  Unlike seq2seq
-#   models (T5, LaMini-Flan-T5), a decoder LM appends tokens to the
-#   assistant turn rather than transforming its input, so prompt rules
-#   never appear verbatim in the generated story.  The built-in chat
-#   template cleanly separates system / user / assistant roles.
-#   Loaded after the caption model has been freed; peak RAM ≈ 728 MB ✅.
 # ---------------------------------------------------------------------------
 CAPTION_MODEL_NAME: str = "microsoft/git-base-coco"
 STORY_MODEL_NAME: str   = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -110,8 +89,6 @@ TTS_SLOW_SPEECH: bool = False  # False = normal reading speed for children
 
 # ---------------------------------------------------------------------------
 # Child-safety: words that must not appear in the final story.
-# Uses whole-word regex matching to avoid false positives on substrings
-# (e.g. the word "dead" inside "instead").
 # ---------------------------------------------------------------------------
 BANNED_TERMS: List[str] = [
     "blood", "kill", "dead", "gun", "knife",
@@ -120,10 +97,7 @@ BANNED_TERMS: List[str] = [
 ]
 
 # ---------------------------------------------------------------------------
-# Story style options
-# Each key is the human-readable label shown in the sidebar.
-# Each value is a 2-tuple: (tone_description, ending_instruction).
-# Both strings are injected into the LLM system message.
+# Story style options – each key is a user-facing label shown in the sidebar
 # ---------------------------------------------------------------------------
 STYLE_OPTIONS: Dict[str, Tuple[str, str]] = {
     "Warm & Happy 😊": (
@@ -143,8 +117,6 @@ STYLE_OPTIONS: Dict[str, Tuple[str, str]] = {
 
 # ---------------------------------------------------------------------------
 # CSS gradient backgrounds – one per style.
-# Used in both the header banner (U1) and the story card (U2) so the
-# colour theme changes automatically when the user picks a different style.
 # ---------------------------------------------------------------------------
 STYLE_GRADIENTS: Dict[str, str] = {
     "Warm & Happy 😊": "linear-gradient(135deg, #D4B3F5 0%, #8EC5FC 100% )",
@@ -162,13 +134,6 @@ DEFAULT_GRADIENT: str = STYLE_GRADIENTS["Warm & Happy 😊"]
 
 def count_words(text: str) -> int:
     """Return the number of word tokens in *text*.
-
-    Uses a regex that matches contractions (e.g. "it's") and hyphenated
-    compounds as single tokens, consistent with how the LLM counts words.
-
-    Args:
-        text: Any string to be counted.
-
     Returns:
         Integer word count (0 for an empty or whitespace-only string).
     """
@@ -177,14 +142,6 @@ def count_words(text: str) -> int:
 
 def contains_unsafe_content(text: str) -> bool:
     """Check whether *text* contains any term from BANNED_TERMS.
-
-    Performs whole-word matching (\\b anchors) to avoid false positives on
-    substrings – for example, "dead" would match in "dead" but NOT in the
-    word "instead".
-
-    Args:
-        text: The string to scan (typically the generated story).
-
     Returns:
         True if at least one banned term is found; False otherwise.
     """
@@ -196,15 +153,7 @@ def contains_unsafe_content(text: str) -> bool:
 
 
 def clean_text(text: str) -> str:
-    """Normalise whitespace in *text*.
-
-    Collapses any sequence of whitespace characters (spaces, tabs, newlines)
-    into a single space and strips leading / trailing whitespace.  Called
-    after every model output to produce a clean, single-line string.
-
-    Args:
-        text: Raw model output or any string to normalise.
-
+    """Normalise whitespace (spaces, tabs, newlines) in *text*.
     Returns:
         Whitespace-normalised string.
     """
@@ -213,15 +162,6 @@ def clean_text(text: str) -> str:
 
 def validate_image(uploaded_file) -> Tuple[bool, Optional[str]]:
     """Validate that *uploaded_file* is a supported image type.
-
-    Checks the MIME type reported by Streamlit's UploadedFile object.
-    Does NOT open or decode the image – that is handled separately by
-    ``safe_open_image`` to provide more granular error messages.
-
-    Args:
-        uploaded_file: A ``streamlit.runtime.uploaded_file_manager.UploadedFile``
-                       object, or None if no file has been uploaded.
-
     Returns:
         A 2-tuple ``(is_valid, error_message)`` where:
         - ``is_valid`` is True when the file passes validation.
@@ -240,15 +180,6 @@ def validate_image(uploaded_file) -> Tuple[bool, Optional[str]]:
 
 def safe_open_image(uploaded_file) -> Image.Image:
     """Open *uploaded_file* with Pillow and convert it to RGB colour mode.
-
-    Wraps Pillow's ``Image.open`` with specific exception handling so that
-    callers receive a clear ``ValueError`` with a user-friendly message
-    rather than a raw Pillow exception.
-
-    Args:
-        uploaded_file: A Streamlit UploadedFile object that has already
-                       passed ``validate_image``.
-
     Returns:
         A ``PIL.Image.Image`` object in RGB mode.
 
@@ -265,16 +196,6 @@ def safe_open_image(uploaded_file) -> Image.Image:
 
 def truncate_at_sentence_boundary(text: str, max_words: int) -> str:
     """Shorten *text* to at most *max_words* words, preserving sentence ends.
-
-    Iterates through sentences (split on ``.``, ``!``, or ``?`` followed by
-    whitespace) and keeps complete sentences while the running word count
-    stays within *max_words*.  If not even a single sentence fits, falls
-    back to a word-level cut with a closing period appended.
-
-    Args:
-        text:      The story string to truncate.
-        max_words: Maximum number of words allowed in the output.
-
     Returns:
         Truncated string that ends at a sentence boundary (or a word
         boundary with a period appended as a last resort).
@@ -306,33 +227,17 @@ def truncate_at_sentence_boundary(text: str, max_words: int) -> str:
 
 
 # ===========================================================================
-# SECTION 3 – MODEL EXECUTION FUNCTIONS  (load → run → free)
+# SECTION 3 – MODEL EXECUTION FUNCTIONS
 # ===========================================================================
-#
-# Memory budget on Streamlit Cloud free tier (~1 GB usable RAM)
-# ──────────────────────────────────────────────────────────────
-#   Step 1  git-base-coco      (caption)  ~728 MB fp32  → del + gc.collect()
-#   Step 2  Qwen2.5-0.5B-Inst  (story)    ~500 MB fp16  → del + gc.collect()
-#   Step 3  gTTS               (audio)      ~0 MB HTTPS
-#
-#   Peak RAM = max(728 MB, 500 MB) = 728 MB  ✅  (well within 1 GB)
 #
 # Each function follows the same pattern:
 #   1. Load the model / pipeline.
 #   2. Run inference inside a try block.
 #   3. Delete the model and call gc.collect() in the finally block so that
-#      memory is released even if an exception occurs mid-inference.
+#      memory is released even if an exception occurs mid-inference, optimizing for streamlit RAM limitations.
 
 def run_caption_model(image: Image.Image) -> str:
     """Generate a scene description for *image* using GIT-base-COCO.
-
-    Loads the microsoft/git-base-coco image-to-text pipeline, runs a
-    single forward pass, then frees all model weights.  Peak RAM during
-    this step is approximately 728 MB.
-
-    Args:
-        image: A PIL RGB image to caption.
-
     Returns:
         A cleaned, single-line caption string (e.g. "a woman sitting in
         a golden carriage surrounded by swans").
@@ -366,20 +271,6 @@ def build_chat_messages(
     style_ending: str,
 ) -> List[Dict[str, str]]:
     """Construct the chat-template message list for Qwen2.5-0.5B-Instruct.
-
-    Separates storytelling constraints into the system message and the
-    image scene into the user message.  This split is critical: Qwen's
-    decoder treats the system message as background context it should
-    *follow*, not reproduce.  Earlier seq2seq models (LaMini-Flan-T5)
-    copied rule text verbatim because they could not distinguish
-    instructions from story content.
-
-    Design decisions:
-    - No full few-shot examples: prevents the model from copying example
-      sentences instead of generating original content.
-    - Style tone and ending are injected as natural sentences, not
-      numbered rules, to avoid the model echoing the rule numbers.
-    - Length constraint (60-90 words) is stated once in the system message.
 
     Args:
         caption:      The image caption produced by the captioning step.
@@ -416,30 +307,6 @@ def build_chat_messages(
 
 def run_story_model(caption: str, style_label: str) -> str:
     """Generate a children's story from *caption* using Qwen2.5-0.5B-Instruct.
-
-    Loads the story model in fp16 on CPU (~500 MB RAM), applies the
-    built-in Qwen chat template, runs greedy-sampled generation, then
-    frees all weights before returning.
-
-    Why Qwen2.5-0.5B-Instruct outperforms LaMini-Flan-T5-248M here:
-    - Decoder-only architecture: the model only generates tokens that
-      follow the assistant turn marker, so prompt rules are never echoed.
-    - Instruction fine-tuning: the model understands "write a children's
-      story" and respects length / style constraints without repeating them.
-    - fp16 loading keeps peak RAM at ~500 MB, safely within the 728 MB
-      already occupied (and then freed) by the caption step.
-
-    Generation parameters:
-    - do_sample=True / temperature=0.8 : controlled creativity without
-      wild hallucinations; pure beam search on a small model tends to
-      produce repetitive high-probability phrases.
-    - top_p=0.9                        : nucleus sampling filters the very
-      long tail of low-probability tokens.
-    - repetition_penalty=1.15          : mild penalty prevents successive
-      sentences from opening with the same phrase.
-    - max_new_tokens=180               : generous ceiling; post-processing
-      trims if needed.
-    - min_new_tokens=60                : prevents a one-sentence output.
 
     Args:
         caption:     The image caption from ``run_caption_model``.
@@ -495,14 +362,6 @@ def run_story_model(caption: str, style_label: str) -> str:
 def run_tts(story_text: str) -> bytes:
     """Convert *story_text* to MP3 audio bytes via Google TTS (gTTS).
 
-    Uses the gTTS library, which makes an outbound HTTPS request to
-    Google's TTS API and streams the MP3 back.  No local model weights
-    are downloaded; RAM impact is negligible.  Streamlit Cloud allows
-    outbound HTTPS, so this works without any special configuration.
-
-    Args:
-        story_text: The final, constraint-checked story string.
-
     Returns:
         Raw MP3 audio as a ``bytes`` object, suitable for
         ``st.audio(audio_bytes, format="audio/mp3")``.
@@ -519,23 +378,7 @@ def run_tts(story_text: str) -> bytes:
 # ===========================================================================
 
 def enforce_story_constraints(raw_story: str) -> Tuple[str, Optional[str]]:
-    """Apply safety, length, and quality constraints to *raw_story*.
-
-    Three checks are applied in priority order:
-
-    1. **Safety check** – if the story contains any term from BANNED_TERMS,
-       it is replaced entirely with a guaranteed child-safe fallback sentence.
-       This is a hard block; no further checks are run on the fallback.
-
-    2. **Hard-length ceiling** – if the word count exceeds TARGET_HARD_MAX,
-       the story is trimmed to the nearest sentence boundary so that it
-       never reads as abruptly cut mid-sentence.
-
-    3. **Soft minimum** – if the word count is below TARGET_MIN_WORDS, an
-       informational warning is returned but the short story is still shown
-       (it may still be enjoyable; hiding it would be worse UX).
-
-    No additional model calls are made in this function.
+    """Apply safety, length, and quality constraints in order to *raw_story*.
 
     Args:
         raw_story: The story string returned by ``run_story_model``.
@@ -581,17 +424,7 @@ def enforce_story_constraints(raw_story: str) -> Tuple[str, Optional[str]]:
 # ===========================================================================
 
 def render_header(style_label: str = "Warm & Happy 😊") -> None:
-    """Render the gradient banner at the top of the main page (U1).
-
-    Injects a CSS-styled ``<div>`` with a gradient background that matches
-    the currently selected story style.  Using ``unsafe_allow_html=True``
-    is safe here because the only dynamic value injected is a CSS gradient
-    string sourced from the internal STYLE_GRADIENTS constant, not from
-    user input.
-
-    Args:
-        style_label: The currently selected style key from STYLE_OPTIONS.
-                     Controls which gradient is applied to the banner.
+    """Render the gradient banner at the top of the main page.
     """
     banner_gradient = STYLE_GRADIENTS.get(style_label, DEFAULT_GRADIENT)
     st.markdown(
@@ -624,16 +457,7 @@ def render_header(style_label: str = "Warm & Happy 😊") -> None:
 
 
 def render_story_card(story_text: str, style_label: str) -> None:
-    """Display *story_text* inside a styled gradient card (U2).
-
-    The card uses the same gradient as the header banner, creating a
-    coherent colour theme across the page.  A coloured left border provides
-    a visual anchor that draws the reader's eye to the story text.
-
-    Args:
-        story_text:  The final, processed story string to display.
-        style_label: The currently selected style key, used to look up
-                     the matching gradient from STYLE_GRADIENTS.
+    """Display *story_text* inside a styled gradient card.
     """
     card_gradient = STYLE_GRADIENTS.get(style_label, DEFAULT_GRADIENT)
     st.markdown(
@@ -657,24 +481,7 @@ def render_story_card(story_text: str, style_label: str) -> None:
 
 
 def render_sidebar() -> Tuple[str, bool, bool]:
-    """Render the sidebar with style selection and advanced options (U4).
-
-    Layout:
-    - A decorative gradient banner heading.
-    - A radio button group for story style (replaces the previous selectbox
-      so all three options are visible at a glance without a dropdown).
-    - A collapsed expander for less-frequently used options (caption display
-      and debug info), keeping the sidebar uncluttered by default.
-
-    Widget keys (``key=`` parameter) are required for checkboxes inside
-    ``st.expander`` to ensure Streamlit preserves their state correctly
-    across reruns triggered by other widgets.
-
-    Returns:
-        A 3-tuple ``(story_style_label, show_caption, show_debug)`` where:
-        - ``story_style_label`` is the selected key from STYLE_OPTIONS.
-        - ``show_caption``      is True if the image caption should be shown.
-        - ``show_debug``        is True if the debug info panel should be shown.
+    """Render the sidebar with style selection and advanced options.
     """
     # Decorative sidebar header banner
     st.sidebar.markdown(
@@ -695,7 +502,7 @@ def render_sidebar() -> Tuple[str, bool, bool]:
         unsafe_allow_html=True,
     )
 
-    # Radio group: one visible option per style (U4)
+    # Radio group: one visible option per style
     selected_style = st.sidebar.radio(
         "🎨 Story Style",
         options=list(STYLE_OPTIONS.keys()),
@@ -723,11 +530,6 @@ def render_sidebar() -> Tuple[str, bool, bool]:
 
 def render_upload_area() -> None:
     """Render a decorative dashed-border hint above the file uploader (U6).
-
-    Uses an HTML ``<div>`` with a dashed border and centred text to create
-    a recognisable drop-zone visual that guides users (including children's
-    parents) to upload their picture.  The actual Streamlit file uploader
-    widget follows immediately beneath this hint box.
     """
     st.markdown(
         """
