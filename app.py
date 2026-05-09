@@ -449,7 +449,7 @@ def render_header(style_label: str = "Warm & Happy 😊") -> None:
                 margin: 0.5rem 0 0 0;
                 font-size: 1.05rem;
                 color: #3A3A3A;
-            ">Select story style in the sidebar & Upload a picture and create a fun story for kids! ✨</p>
+            ">Select story style in the sidebar & upload a picture to create a fun story for kids! ✨</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -543,7 +543,7 @@ def render_upload_area() -> None:
         ">
             <div style="font-size: 2rem;">🖼️</div>
             <p style="margin: 0.3rem 0 0 0; color: #666; font-size: 0.95rem;">
-                Drag &amp; drop your picture below or click the button below
+                Drag &amp; Drop or Click the Button below
                 <br>
                 <span style="color: #aaa; font-size: 0.85rem;">
                     PNG · JPG ·JPEG · WEBP supported
@@ -612,7 +612,7 @@ def main() -> None:
     if uploaded_file is None:
         # The banner is shown only at this stage so it does not clutter the
         # results view after a story has been generated.
-        st.info("📸 Upload a picture above to begin your story adventure! 🌟")
+        st.info("📸 Upload a picture above to begin your story adventure! ")
         render_footer()
         return
 
