@@ -599,52 +599,13 @@ def main() -> None:
     selected_style_label, show_image_caption, show_debug_panel = render_sidebar()
     render_header(selected_style_label)
 
-    # --- File uploader ---
-    # CSS tweaks injected before the widget renders so selectors apply on
-    # first paint.  Targets:
-    #   [data-testid="stFileUploader"]          – outer wrapper  (label centering)
-    #   [data-testid="stFileUploadDropzone"]    – drop zone box  (size + dashed border)
-    #   [data-testid="stInfoBox"]               – st.info bubble (centering)
-    st.markdown(
-        """
-        <style>
-        /* ── 1. Centre the file-uploader label ─────────────────────────── */
-        [data-testid="stFileUploader"] label,
-        [data-testid="stFileUploader"] > div > label {
-            width: 100%;
-            text-align: center;
-            font-size: 1.05rem;
-            font-weight: 600;
-        }
+    # --- Upload area (U6) ---
+    render_upload_area()
 
-        /* ── 2. Larger drop-zone with dashed border ─────────────────────── */
-        [data-testid="stFileUploadDropzone"] {
-            min-height: 160px;
-            border: 2px dashed #9AADBA !important;
-            border-radius: 14px !important;
-            background: #F7FAFC !important;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-
-        /* ── 3. Centre the st.info prompt message ───────────────────────── */
-        [data-testid="stInfoBox"],
-        div[data-testid="stAlert"][class*="info"] {
-            text-align: center;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # Using st.file_uploader directly without any decorative HTML div on top.
-    # Streamlit's native uploader has built-in drag-and-drop support; placing
-    # a separate HTML element above it caused users to drop files onto the
-    # inert div instead of the actual upload target, making drag-and-drop fail.
     uploaded_file = st.file_uploader(
-        "Upload your picture (PNG · JPG · JPEG · WEBP supported)",
+        "Choose an image",
         type=["png", "jpg", "jpeg", "webp"],
+        label_visibility="collapsed",  # The hint div above acts as the label
     )
 
     # Guard: no file yet – show style-reminder banner and friendly prompt, then stop.
